@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>New Tab</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Hanken+Grotesk:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="home.css" />
+</head>
+<body>
+  <div class="app">
+    <!-- masthead -->
+    <header class="masthead">
+      <span class="label" id="date">—</span>
+      <div class="right">
+        <div class="weather" id="weather"></div>
+        <button class="icon-btn" id="settings-btn" type="button" title="Settings" aria-label="Settings"></button>
+      </div>
+    </header>
+    <div class="rule"></div>
+
+    <div class="layout">
+      <div class="main-col">
+        <!-- hero -->
+        <main class="hero">
+          <div class="greeting label" id="greeting">Good day</div>
+          <h1 class="clock" id="clock">00:00</h1>
+
+          <form class="search" id="search-form" role="search">
+            <span class="mag" id="mag"></span>
+            <input type="text" id="q" name="q" placeholder="Search the web" autocomplete="off" spellcheck="false" tabindex="1" autofocus />
+            <div class="engine">
+              <button class="engine-btn" id="engine-btn" type="button" aria-haspopup="true">
+                <span id="engine-label">Google</span><span id="engine-chev"></span>
+              </button>
+              <div class="engine-menu" id="engine-menu" role="menu"></div>
+            </div>
+          </form>
+
+          <div class="recent" id="recent"></div>
+        </main>
+
+        <!-- footer / links -->
+        <footer class="footer">
+          <div class="rule"></div>
+          <nav class="links" id="links" aria-label="Shortcuts"></nav>
+        </footer>
+      </div>
+
+      <div class="side-col">
+        <!-- rain radar: just the map, with the controls floating on it -->
+        <section class="radar" id="radar" aria-label="Rain radar">
+          <div class="radar-view" id="radar-view">
+            <!-- map layers, zoomed slightly to crop BoM's text lines -->
+            <div class="radar-map">
+              <img class="radar-layer" id="radar-bg" alt="" referrerpolicy="no-referrer" style="filter: url(#radar-duotone)" />
+              <div class="radar-frames" id="radar-frames"></div>
+              <img class="radar-layer" id="radar-places" alt="" referrerpolicy="no-referrer" style="filter: url(#radar-ink)" />
+            </div>
+            <div class="radar-status" id="radar-status">Loading radar…</div>
+            <div class="radar-tr">
+              <button class="radar-chip radar-btn radar-hover" id="radar-play" type="button" title="Pause" aria-label="Pause"></button>
+              <span class="radar-chip radar-time" id="radar-time"></span>
+            </div>
+            <div class="radar-chip radar-ticks" id="radar-ticks"></div>
+            <a class="radar-chip radar-src radar-hover" id="radar-src" target="_blank" rel="noopener">BoM ↗</a>
+          </div>
+          <!-- Recolouring filters (home.js fills in the colours from the
+               wallpaper). They work on BoM's cross-origin images because
+               nothing reads the pixels: the browser applies them at paint. -->
+          <svg class="radar-filters" width="0" height="0" aria-hidden="true" focusable="false">
+            <!-- map: drop the sea, then luminance → wallpaper tones (dark lines … land) -->
+            <filter id="radar-duotone" color-interpolation-filters="sRGB">
+              <!-- keep-mask from "how blue": alpha = 8·(R − B) + 1.14, so the
+                   pale-blue sea (B well above R) → transparent and neutral or
+                   warm pixels (coastlines, land) → opaque. The edge sits at
+                   B − R ≈ 0.08 and ramps over a few shades rather than
+                   switching, which anti-aliases the lines -->
+              <feColorMatrix in="SourceGraphic" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  8 0 -8 0 1.14" result="land" />
+              <feColorMatrix in="SourceGraphic" type="matrix" values="0.2126 0.7152 0.0722 0 0  0.2126 0.7152 0.0722 0 0  0.2126 0.7152 0.0722 0 0  0 0 0 1 0" result="lum" />
+              <feComponentTransfer in="lum" result="toned">
+                <feFuncR type="table" tableValues="0 1" />
+                <feFuncG type="table" tableValues="0 1" />
+                <feFuncB type="table" tableValues="0 1" />
+              </feComponentTransfer>
+              <feComposite in="toned" in2="land" operator="in" result="landToned" />
+              <!-- BoM's land edge is hard, un-smoothed pixels: a whisper of
+                   blur takes the stair-steps off -->
+              <feGaussianBlur in="landToned" stdDeviation="0.35" result="landSoft" />
+              <!-- coastline: a slightly wider blur of the land, its alpha
+                   boosted so it reaches ~1px past the edge, filled with the
+                   line tone and laid underneath: a thin, anti-aliased ring -->
+              <feGaussianBlur in="landToned" stdDeviation="0.8" result="spread" />
+              <feComponentTransfer in="spread" result="halo">
+                <feFuncA type="linear" slope="2.2" intercept="0" />
+              </feComponentTransfer>
+              <feFlood flood-color="#ffffff" flood-opacity="0.85" result="edgeColour" />
+              <feComposite in="edgeColour" in2="halo" operator="in" result="edge" />
+              <feMerge>
+                <feMergeNode in="edge" />
+                <feMergeNode in="landSoft" />
+              </feMerge>
+            </filter>
+            <!-- town names + dots: one flat ink colour -->
+            <filter id="radar-ink" color-interpolation-filters="sRGB">
+              <feColorMatrix type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0" />
+            </filter>
+          </svg>
+        </section>
+
+        <!-- notes -->
+        <aside class="notes" aria-label="Notes">
+          <div class="notes-head">
+            <span class="label">Notes</span>
+            <span class="notes-meta" id="notes-meta" aria-live="polite"></span>
+          </div>
+          <div class="notes-toolbar" id="notes-toolbar" role="toolbar" aria-label="Formatting" aria-controls="notes-editor"></div>
+          <div class="notes-editor" id="notes-editor" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Notes" spellcheck="true" data-placeholder="Jot something down…"></div>
+        </aside>
+      </div>
+    </div>
+  </div>
+
+  <script src="home.js"></script>
+</body>
+</html>
