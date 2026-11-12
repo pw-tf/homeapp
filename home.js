@@ -415,6 +415,13 @@
     grid.append(h("button", { class: "bubble-item bubble-add", type: "button", onclick: () => openLinkModal(null, folder.id) },
       h("span", { class: "tile", html: PLUS }), h("span", { class: "name" }, "Add link")));
     [...grid.children].forEach((el, j) => el.style.setProperty("--i", j)); // stagger
+    // the items rise in from below and overshoot, which would briefly
+    // overflow the grid and flash its scrollbar: no scrolling until the last
+    // one has landed
+    if (animate) {
+      grid.classList.add("opening");
+      grid.addEventListener("animationend", (e) => { if (e.target === grid.lastElementChild) grid.classList.remove("opening"); });
+    }
 
     const b = h("div", { class: "bubble" + (animate ? "" : " static"), role: "group", "aria-label": `${folder.name || "Folder"} folder` },
       h("div", { class: "bubble-head" },

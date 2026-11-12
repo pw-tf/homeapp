@@ -550,6 +550,7 @@ body::before {
   overscroll-behavior: contain;
   scrollbar-width: thin;
 }
+.bubble-grid.opening { overflow: hidden; }
 
 .bubble-item {
   position: relative;
