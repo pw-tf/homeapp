@@ -102,9 +102,10 @@ Link, Settings). The page is a single full-viewport column.
     `rgba(0,0,0,.07)` border + `--tile-shadow`. Contents resolve in priority
     order (see Icon System). Favicon/custom image renders at 60%×60% contained;
     emoji at 16px; letter at 13px/600 in `--tile-ink`.
-  - **Add link button** — dashed `--card-border` border, radius 12px, padding
-    `9px 18px`, `--ink-soft`; "+" SVG + `Add link`. Hover firms the border.
-    A second dashed **New folder** button sits beside it.
+  - **Add button** — dashed `--card-border` border, radius 12px, padding
+    `9px 18px`, `--ink-soft`; "+" SVG + `Add`. Hover firms the border.
+    Clicking it pops a small paper menu upward (same look as the engine
+    menu): **Link** / **Folder**. Closes on a click off it or Esc.
   - **Folder card** — same card as a link (`.link-card.folder-card`, a
     `div role="button"`), with a folder-glyph tile (outline glyph in
     `--tile-ink`, swapping to an open-folder glyph while open; or an emoji),
@@ -217,6 +218,9 @@ Link, Settings). The page is a single full-viewport column.
   (Auto / Emoji / Image / Letter) with a context panel below it; actions row
   (Delete on the left when editing; Cancel ghost + primary Add/Save on right).
   - Auto → hint only (uses favicon from URL).
+  - Icon → the icon-set picker (see Icon System): search box + a grid of
+    48 starter icons / up to 64 search results. Folders get the same picker
+    (Folder / Icon / Emoji).
   - Emoji → text input + an 8-col grid of 24 common emojis.
   - Image → URL input + hint ("direct link to an image").
   - Letter → 1–2 char input (defaults to name's first letter).
@@ -295,6 +299,15 @@ only swaps it in `onload` when `naturalWidth > 1`. Resolution order:
 3. `icon.kind === 'image'` → custom image URL, letter fallback.
 4. `icon.kind === 'auto'` (default) → favicon
    `https://www.google.com/s2/favicons?domain={host}&sz=64`, letter fallback.
+5. `icon.kind === 'icon'` → a [Lucide](https://lucide.dev) icon (free, ISC),
+   drawn at 58% in `--tile-ink`. The picker searches / fetches from the
+   Iconify API (`api.iconify.design/search?prefix=lucide…`,
+   `api.iconify.design/lucide.json?icons=…`) only while it's open; the picked
+   icon's shapes are stored on the link as `{ kind:"icon",
+   name:"lucide:house", body, w, h }`, so tiles render instantly and offline.
+   Because the markup comes from a third party it's rebuilt via `DOMParser`
+   keeping only shape elements and presentation attributes. The set is the
+   `ICON_SET` constant in `home.js`.
 
 ## State Management
 All client-side, persisted to `localStorage`:
@@ -350,7 +363,8 @@ links `gap 12px`; footer `padding-bottom 30px`.
 ## Assets
 - **Fonts:** Google Fonts (Instrument Serif, Hanken Grotesk, Space Grotesk).
 - **Icons:** all inline SVG defined in `home.js` (pencil, ×, +, gear, magnifier,
-  chevron, sun/cloud/rain/snow). No icon font.
+  chevron, sun/cloud/rain/snow, folder, link). No icon font. User-picked
+  link / folder icons come from Lucide via Iconify (above).
 - **Favicons:** fetched at runtime from Google's S2 favicon service.
 - **No bundled image assets.** Background images are user-supplied URLs.
 

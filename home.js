@@ -254,6 +254,7 @@
       img.src = src;
     };
 
+    if (icon.kind === "icon") { const s = iconNode(icon); if (s) { t.append(s); return t; } }
     if (icon.kind === "emoji" && icon.value) { t.append(h("span", { class: "emoji" }, icon.value)); return t; }
     if (icon.kind === "letter") { setLetter((icon.value || letterChar).slice(0, 1).toUpperCase()); return t; }
     if (icon.kind === "image" && icon.value) { setLetter(); swapImg(icon.value); return t; }
@@ -262,6 +263,108 @@
     const fav = faviconUrl(link.url);
     if (fav) swapImg(fav);
     return t;
+  }
+
+  /* ----- icon set: Lucide, via the Iconify API --------------------------- */
+  // Free, ISC-licensed outline icons (lucide.dev). The picker searches and
+  // fetches them from api.iconify.design only while it's open; a picked
+  // icon's shapes are stored with the link / folder as
+  // { kind: "icon", name: "lucide:house", body, w, h }, so tiles render
+  // instantly and offline.
+  const ICON_API = "https://api.iconify.design";
+  const ICON_SET = "lucide";
+  const ICON_STARTERS = ["house", "mail", "calendar", "message-circle", "music", "headphones", "film", "tv", "video", "camera", "image", "gamepad-2",
+    "shopping-cart", "wallet", "landmark", "chart-line", "briefcase", "newspaper", "book-open", "notebook-pen", "graduation-cap", "file-text", "bookmark", "star",
+    "code", "terminal", "github", "server", "database", "cpu", "cloud", "bot", "globe", "map", "plane", "utensils",
+    "coffee", "dumbbell", "heart", "palette", "sparkles", "users", "rss", "podcast", "shield", "wrench", "search", "folder"];
+  const iconCache = new Map(); // name → { body, w, h }
+
+  // fetch the shapes for many icons in one request; returns the names found
+  async function fetchIcons(names) {
+    const need = names.filter((n) => !iconCache.has(n));
+    if (need.length) {
+      const r = await fetch(`${ICON_API}/${ICON_SET}.json?icons=${need.map(encodeURIComponent).join(",")}`);
+      const j = await r.json();
+      for (const n of need) {
+        const alias = j.aliases && j.aliases[n];
+        const ic = (j.icons || {})[n] || (alias && j.icons[alias.parent]);
+        if (ic) iconCache.set(n, { body: ic.body, w: ic.width || j.width || 24, h: ic.height || j.height || 24 });
+      }
+    }
+    return names.filter((n) => iconCache.has(n));
+  }
+  async function searchIcons(q) {
+    const r = await fetch(`${ICON_API}/search?query=${encodeURIComponent(q)}&prefix=${ICON_SET}&limit=64`);
+    const j = await r.json();
+    return (j.icons || []).map((full) => full.split(":")[1]);
+  }
+
+  // The shapes come from a third-party API and are stored as text, so they're
+  // rebuilt through DOMParser keeping only plain shape elements and presentation
+  // attributes: nothing that could run script survives.
+  const SVG_TAGS = new Set(["svg", "g", "path", "circle", "ellipse", "line", "polyline", "polygon", "rect"]);
+  const SVG_ATTRS = new Set(["viewBox", "xmlns", "d", "cx", "cy", "r", "rx", "ry", "x", "y", "x1", "y1", "x2", "y2", "width", "height", "points", "transform", "opacity",
+    "fill", "fill-rule", "fill-opacity", "clip-rule", "stroke", "stroke-width", "stroke-linecap", "stroke-linejoin", "stroke-miterlimit", "stroke-opacity", "stroke-dasharray"]);
+  function iconNode(icon) {
+    if (!icon || !icon.body) return null;
+    const doc = new DOMParser().parseFromString(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${+icon.w || 24} ${+icon.h || 24}">${icon.body}</svg>`, "image/svg+xml");
+    const root = doc.documentElement;
+    if (root.nodeName !== "svg") return null;
+    const clean = (el) => {
+      for (const c of [...el.children]) { if (SVG_TAGS.has(c.nodeName)) clean(c); else c.remove(); }
+      for (const a of [...el.attributes]) if (!SVG_ATTRS.has(a.name) || /url\s*\(|javascript:/i.test(a.value)) el.removeAttribute(a.name);
+    };
+    clean(root);
+    const svg = document.importNode(root, true);
+    svg.setAttribute("class", "ico");
+    svg.setAttribute("aria-hidden", "true");
+    return svg;
+  }
+
+  // drop the picked-icon fields once another kind is chosen, so they don't linger in storage
+  function tidyIcon(icon) {
+    if (icon.kind !== "icon") { delete icon.name; delete icon.body; delete icon.w; delete icon.h; }
+    return icon;
+  }
+
+  // search box + grid of icons; onPick gets { name, body, w, h }
+  function iconPicker(currentName, onPick) {
+    const grid = h("div", { class: "icon-grid" });
+    const status = h("p", { class: "hint icon-status", "aria-live": "polite" });
+    let seq = 0, timer = null;
+
+    async function load(q) {
+      const my = ++seq;
+      status.textContent = "Loading icons…";
+      try {
+        const cur = currentName && currentName.split(":")[1];
+        const names = q ? await searchIcons(q) : [...new Set([cur, ...ICON_STARTERS].filter(Boolean))];
+        const found = await fetchIcons(names);
+        if (my !== seq) return; // a newer search has started
+        grid.innerHTML = "";
+        found.forEach((n) => {
+          const full = `${ICON_SET}:${n}`, ic = iconCache.get(n);
+          const b = h("button", { type: "button", title: n, "aria-label": n, "aria-pressed": String(full === currentName), class: full === currentName ? "active" : "",
+            onclick: () => {
+              grid.querySelectorAll(".active").forEach((x) => { x.classList.remove("active"); x.setAttribute("aria-pressed", "false"); });
+              b.classList.add("active"); b.setAttribute("aria-pressed", "true");
+              currentName = full;
+              onPick({ name: full, body: ic.body, w: ic.w, h: ic.h });
+            } });
+          const s = iconNode(ic); if (s) b.append(s);
+          grid.append(b);
+        });
+        status.textContent = found.length ? "" : `No icons match “${q}”.`;
+      } catch (e) {
+        if (my === seq) status.textContent = "Couldn't reach the icon library. Check your connection and try again.";
+      }
+    }
+
+    const input = h("input", { type: "text", placeholder: "Search icons: music, mail, code…", spellcheck: "false",
+      oninput: (e) => { clearTimeout(timer); timer = setTimeout(() => load(e.target.value.trim()), 250); } });
+    load("");
+    return h("div", { class: "icon-picker" }, input, grid, status,
+      h("p", { class: "hint" }, "Icons from ", h("a", { href: "https://lucide.dev", target: "_blank", rel: "noopener" }, "Lucide"), " (free, ISC licence), via Iconify."));
   }
 
   /* ----- render --------------------------------------------------------- */
@@ -321,7 +424,9 @@
 
   function makeFolderTile(folder, open) {
     const t = h("div", { class: "tile folder-tile" });
-    if (folder.icon && folder.icon.kind === "emoji" && folder.icon.value) t.append(h("span", { class: "emoji" }, folder.icon.value));
+    const icon = folder.icon || {}, picked = icon.kind === "icon" && iconNode(icon);
+    if (picked) t.append(picked);
+    else if (icon.kind === "emoji" && icon.value) t.append(h("span", { class: "emoji" }, icon.value));
     else t.innerHTML = open ? FOLDER_OPEN : FOLDER;
     return t;
   }
@@ -336,10 +441,28 @@
     const wrap = $("#links");
     wrap.innerHTML = "";
     links.forEach((item, i) => wrap.append(isFolder(item) ? folderCard(item, i) : linkCard(item, i)));
-    wrap.append(
-      h("button", { class: "add-card", type: "button", onclick: () => openLinkModal(null) }, h("span", { html: PLUS }), "Add link"),
-      h("button", { class: "add-card", type: "button", onclick: () => openFolderModal(null) }, h("span", { html: FOLDER_PLUS }), "New folder"));
+    wrap.append(addButton());
     if (bubbleEl) renderBubble(false);
+  }
+
+  // one "+ Add" button; it pops a small menu above it: Link / Folder
+  function addButton() {
+    const pick = (fn) => () => { closeAddMenu(); fn(); };
+    const menu = h("div", { class: "add-menu", role: "menu" },
+      h("button", { type: "button", role: "menuitem", onclick: pick(() => openLinkModal(null)) }, h("span", { class: "add-menu-ico", html: LINK }), "Link"),
+      h("button", { type: "button", role: "menuitem", onclick: pick(() => openFolderModal(null)) }, h("span", { class: "add-menu-ico", html: FOLDER }), "Folder"));
+    const btn = h("button", { class: "add-card", type: "button", "aria-haspopup": "menu", "aria-expanded": "false",
+      onclick: () => {
+        const open = !wrap.classList.contains("open");
+        wrap.classList.toggle("open", open);
+        btn.setAttribute("aria-expanded", String(open));
+        if (open && btn.matches(":focus-visible")) menu.querySelector("button").focus();
+      } }, h("span", { html: PLUS }), "Add");
+    const wrap = h("div", { class: "add-wrap" }, btn, menu);
+    return wrap;
+  }
+  function closeAddMenu() {
+    document.querySelectorAll(".add-wrap.open").forEach((w) => { w.classList.remove("open"); w.querySelector(".add-card").setAttribute("aria-expanded", "false"); });
   }
 
   function linkCard(link, i) {
@@ -601,6 +724,8 @@
       const k = draft.icon.kind;
       if (k === "auto") {
         iconControls.append(h("p", { class: "hint" }, "Uses the site's favicon, pulled from the URL above. Falls back to a letter tile if none is found."));
+      } else if (k === "icon") {
+        iconControls.append(iconPicker(draft.icon.name, (ic) => { Object.assign(draft.icon, ic); redrawPreview(); }));
       } else if (k === "emoji") {
         const inp = h("input", { type: "text", value: draft.icon.value || "", placeholder: "Paste or pick an emoji", maxlength: "4", oninput: (e) => { draft.icon.value = e.target.value; redrawPreview(); } });
         const grid = h("div", { class: "emoji-grid" });
@@ -626,7 +751,7 @@
       folderSelect ? h("div", { class: "field" }, h("label", {}, "Folder"), folderSelect) : null,
       h("div", { class: "field" },
         h("label", {}, "Icon"),
-        seg([{ value: "auto", label: "Auto" }, { value: "emoji", label: "Emoji" }, { value: "image", label: "Image" }, { value: "letter", label: "Letter" }], draft.icon.kind, (v) => { draft.icon.kind = v; rerenderIconSeg(v); renderIconControls(); redrawPreview(); }),
+        seg([{ value: "auto", label: "Auto" }, { value: "icon", label: "Icon" }, { value: "emoji", label: "Emoji" }, { value: "image", label: "Image" }, { value: "letter", label: "Letter" }], draft.icon.kind, (v) => { draft.icon.kind = v; rerenderIconSeg(v); renderIconControls(); redrawPreview(); }),
         iconControls),
       h("div", { class: "actions" },
         editing ? h("button", { class: "btn btn-danger spacer", type: "button", onclick: () => { deleteLink(draft.id); closeModal(); } }, "Delete") : null,
@@ -642,6 +767,7 @@
     function save() {
       draft.name = (draft.name || "").trim() || domainOf(normalizeUrl(draft.url)) || "Untitled";
       draft.url = normalizeUrl(draft.url);
+      tidyIcon(draft.icon);
       // same place: replace in position; another folder / the row: move to its end
       const now = editing ? locate(draft.id) : null;
       const target = listOf(dest) || links;
@@ -687,14 +813,17 @@
         const grid = h("div", { class: "emoji-grid" });
         EMOJIS.forEach((em) => grid.append(h("button", { type: "button", onclick: () => { draft.icon.value = em; inp.value = em; redrawPreview(); } }, em)));
         iconControls.append(inp, grid);
+      } else if (draft.icon.kind === "icon") {
+        iconControls.append(iconPicker(draft.icon.name, (ic) => { Object.assign(draft.icon, ic); redrawPreview(); }));
       } else {
         iconControls.append(h("p", { class: "hint" }, "A plain folder glyph, which opens when its bubble does."));
       }
     }
 
-    const iconSeg = seg([{ value: "glyph", label: "Folder" }, { value: "emoji", label: "Emoji" }], draft.icon.kind, (v) => {
+    const KINDS = ["glyph", "icon", "emoji"];
+    const iconSeg = seg([{ value: "glyph", label: "Folder" }, { value: "icon", label: "Icon" }, { value: "emoji", label: "Emoji" }], draft.icon.kind, (v) => {
       draft.icon.kind = v;
-      [...iconSeg.children].forEach((b, i) => b.classList.toggle("active", ["glyph", "emoji"][i] === v));
+      [...iconSeg.children].forEach((b, i) => b.classList.toggle("active", KINDS[i] === v));
       renderIconControls(); redrawPreview();
     });
 
@@ -713,7 +842,8 @@
 
     function save() {
       const name = (draft.name || "").trim() || "Folder";
-      const icon = draft.icon.kind === "emoji" && draft.icon.value ? draft.icon : { kind: "glyph", value: "" };
+      const k = draft.icon.kind;
+      const icon = (k === "emoji" && draft.icon.value) || (k === "icon" && draft.icon.body) ? tidyIcon(draft.icon) : { kind: "glyph", value: "" };
       const id = editing ? existing.id : uid();
       if (editing) Object.assign(existing, { name, icon });
       else links.push({ id, type: "folder", name, icon, children: [] });
@@ -1241,7 +1371,7 @@
   const CHEV   = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="opacity:.7"><polyline points="6 9 12 15 18 9"/></svg>`;
   const FOLDER = `<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4.3l2 2.2h8.7A1.5 1.5 0 0 1 21 9.7v8.8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5Z"/></svg>`;
   const FOLDER_OPEN = `<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round" stroke-linecap="round"><path d="M3 18.5v-11A1.5 1.5 0 0 1 4.5 6h4.3l2 2.2h7.2a1.5 1.5 0 0 1 1.5 1.5V11"/><path d="M3 18.5 5.4 12a1.5 1.5 0 0 1 1.4-1h13.5a1 1 0 0 1 .95 1.3l-2 6.6a1.5 1.5 0 0 1-1.44 1.1H4.5A1.5 1.5 0 0 1 3 18.5Z"/></svg>`;
-  const FOLDER_PLUS = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4.3l2 2.2h8.7A1.5 1.5 0 0 1 21 9.7v8.8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5Z"/><line x1="12" y1="11.5" x2="12" y2="16.5"/><line x1="9.5" y1="14" x2="14.5" y2="14"/></svg>`;
+  const LINK = `<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>`;
   // notes toolbar (Lucide-style, 16px)
   const tb = (paths) => `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${paths}</svg>`;
   const ICON_H1        = tb(`<path d="M4 12h8"/><path d="M4 18V6"/><path d="M12 18V6"/><path d="m17 12 3-2v8"/>`);
@@ -1306,6 +1436,13 @@
       closeBubble(false);
     }, true);
     document.addEventListener("keydown", (e) => { if (e.key === "Escape" && bubbleEl && !$("#overlay")) closeBubble(true); });
+
+    // the "+ Add" menu closes on a click off it or Esc
+    document.addEventListener("click", (e) => { if (!e.target.closest(".add-wrap")) closeAddMenu(); });
+    document.addEventListener("keydown", (e) => {
+      const open = e.key === "Escape" && $(".add-wrap.open");
+      if (open) { closeAddMenu(); open.querySelector(".add-card").focus(); }
+    });
     window.addEventListener("resize", placeBubble);
 
     // Chrome new-tab: the browser grabs the address bar after the page loads,
