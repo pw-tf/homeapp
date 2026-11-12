@@ -155,6 +155,22 @@ body::before {
 .weather { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
 .weather svg { display: block; }
 .weather.hidden { display: none; }
+/* no location yet: the readout is a quiet link to Settings */
+.weather-set {
+  appearance: none;
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  color: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: var(--rule);
+  text-underline-offset: 4px;
+}
+.weather-set:hover { text-decoration-color: currentColor; }
 
 .icon-btn {
   appearance: none;
@@ -1234,6 +1250,54 @@ body::before {
   cursor: pointer;
 }
 .swatch-custom:focus-within { outline: 2px solid #b4552d; outline-offset: 2px; }
+
+/* weather location: the current place, a town search, its results */
+.place-now {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 500;
+  color: #1c1a17;
+}
+.place-find { display: flex; gap: 8px; margin-top: 8px; }
+.place-find input { flex: 1; min-width: 0; }
+.place-find .btn { padding-top: 0; padding-bottom: 0; }
+.place-results { display: grid; gap: 2px; margin-top: 6px; }
+.place-results:empty { display: none; }
+.place-results .hint { margin: 2px 0 0; }
+.place-results button {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  font-family: var(--sans);
+  font-size: 14px;
+  font-weight: 500;
+  color: #1c1a17;
+  padding: 9px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.place-results button:hover { background: rgba(0, 0, 0, 0.05); }
+.place-device {
+  display: block;
+  appearance: none;
+  border: 0;
+  background: none;
+  padding: 0;
+  margin-top: 10px;
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 500;
+  color: #7a766c;
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: rgba(0, 0, 0, 0.2);
+  text-underline-offset: 3px;
+}
+.place-device:hover { color: #1c1a17; }
 
 /* toggle row */
 .row {
