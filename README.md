@@ -12,7 +12,7 @@ gracefully flips to a light-on-dark treatment over dark/image backgrounds.
 This replaces an older glassmorphism new-tab page. Key goals of the refresh:
 1. **Icons that never break.** The old page used an icon font with no brand
    logos, so most links rendered blank. The new system always shows something.
-2. **Real customization.** Custom backgrounds (image URL / solid / adaptive),
+2. **Real customization.** Custom backgrounds (image URL / solid / adaptive / weather-following dither),
    and full link editing incl. icon choice.
 3. **A fresh, modern, type-led look** instead of dated frosted glass.
 
@@ -231,8 +231,12 @@ Same sheet styling. Sections, top to bottom:
 - **Your name** (text) → feeds the greeting.
 - **Search engine** (segmented: Google / DuckDuckGo / Bing).
 - divider
-- **Background** (segmented: Paper / Solid / Image / Adaptive) with a context
-  panel: Solid → 8 swatches; Image → URL input; Adaptive → hint; Paper → hint.
+- **Background** (segmented: Paper / Solid / Image / Adaptive / Dither) with a
+  context panel: Solid → 8 swatches + a custom colour (a dashed "+" swatch over
+  a native colour input); Image → URL input; Adaptive → hint; Paper → hint;
+  Dither → **Drawn over** (segmented: Colour / Image, showing the swatches or
+  the URL input), **Conditions** (select: Live weather / Clear / Cloudy / Fog /
+  Rain / Snow / Storm) and a hint.
 - **Text & contrast** (segmented: Auto / Dark text / Light text) — overrides the
   auto light/dark theme decision.
 - divider
@@ -283,12 +287,51 @@ Same sheet styling. Sections, top to bottom:
 The whole page reads off CSS custom properties under
 `html[data-theme="light"|"dark"]`. `resolveTheme()` decides which:
 - `appearance === 'light'|'dark'` → forced.
-- else (Auto): **image** → dark; **adaptive** → per time slot; **solid** →
+- else (Auto): **image** (and dither over an image) → dark; **adaptive** → per
+  time slot; **solid** / **dither** over a colour →
   `luminance(color) > 0.55 ? light : dark`; **paper** → light.
 Dark mode adds glass blur to cards/search and a legibility **scrim**
 (`body::before`, `linear-gradient(rgba(8,10,16,.45), rgba(8,10,16,.62))`) over
 image backgrounds. Modals are always the light paper sheet for guaranteed
 legibility regardless of theme.
+
+## Dither background (weather-adaptive)
+A muted, animated ordered-dither texture: `#dither`, a fixed box holding a
+low-resolution `<canvas>` (1 canvas px = 4 CSS px, more on very wide screens;
+`image-rendering: pixelated`) that sits over the wallpaper layer and under the
+page. Drawn at ~30 fps, only while the mode is on.
+
+- **Colour:** the canvas never paints a colour of its own. Each pixel is one of
+  four tones of near-transparent ink — black over a light page, white over a
+  dark one — at `tone × 3.2%` (light), `4%` (dark) or `5%` (over a photo)
+  opacity, so the pattern is always a few shades of whatever is behind it: the
+  chosen swatch / custom colour, or the image.
+- **Field:** two tiles of fractal value noise scroll at different speeds; their
+  sum, scaled and offset, is quantised to tone 0–3 through an 8×8 Bayer matrix.
+- **Weather** (`ditherScene()`, from the same Open-Meteo call as the readout):
+
+  | Conditions (WMO code) | Scene |
+  | --- | --- |
+  | Clear → overcast (0–3) | slow drift; more cloud cover shows more of the field |
+  | Fog (45, 48) | an even, near-still haze, denser towards the bottom |
+  | Drizzle, rain, showers (51–67, 80–82) | streaks falling, brightest at the head and dithering out along the tail |
+  | Snow (71–77, 85, 86) | slow single flecks that sway as they fall |
+  | Thunderstorm (95–99) | heavy rain, plus a soft flash every 5–16 s |
+
+  - **Intensity:** the code sets how hard it falls (`FALL`, 0–1) → number,
+    speed and length of drops / flakes.
+  - **Wind:** speed sets how fast the field drifts and how far rain slants and
+    snow blows; the east–west part of the direction sets which way.
+  - **Night** (`is_day`): everything slows to 70%, tones dim to 80%, and the box
+    gains an 8% black veil.
+  - Scene changes ease over a few seconds; rain and snow thin out or build up
+    rather than cutting.
+- **No weather** (location denied / offline): a calm clear-sky drift, with
+  night taken from the clock (20:00–05:00).
+- **Conditions** in Settings pins a scene instead of following the weather
+  (wind and day/night still apply).
+- **Reduced motion:** one still frame, redrawn only when the scene changes; no
+  flashes.
 
 ## Icon System (the core fix)
 `makeTile(link)` builds the tile and **never shows a broken image**: it renders
@@ -311,20 +354,23 @@ only swaps it in `onload` when `naturalWidth > 1`. Resolution order:
 
 ## State Management
 All client-side, persisted to `localStorage`:
-- `nt_config` → `{ name, engine, appearance, bg:{mode,color,imageUrl},
-  weather:{enabled,unit}, showRecent }`
+- `nt_config` → `{ name, engine, appearance,
+  bg:{mode,color,imageUrl,ditherBase,ditherScene}, weather:{enabled,unit},
+  showRecent }`
 - `nt_links` → `[{ id, name, url, icon:{kind,value} } | { id, type:"folder",
   name, icon:{kind:"glyph"|"emoji",value}, children:[link…] }]`
 - `nt_recent` → `[id, …]` (max 6)
-- `nt_weather` → `{ t, unit, data:{temp,code} }` (30-min cache)
+- `nt_weather` → `{ t, unit, data:{temp,code,isDay,wind,windDir} }` (30-min cache)
 - `nt_palette` → `{ v: 2, url, palette: { shadow, mid, high } }`, sampled from the image wallpaper for the radar
 - `nt_notes` → the notes editor's HTML (`""` when empty). "Reset everything"
   does not clear it.
 
 Weather: `navigator.geolocation.getCurrentPosition` →
-`api.open-meteo.com/v1/forecast?...current=temperature_2m,weather_code` (no API
-key). WMO `weather_code` is grouped to a glyph + label. Fails silently (widget
-hides) if geolocation is denied/unavailable.
+`api.open-meteo.com/v1/forecast?...current=temperature_2m,weather_code,is_day,wind_speed_10m,wind_direction_10m`
+(no API key). WMO `weather_code` is grouped to a glyph + label. Fails silently
+(widget hides) if geolocation is denied/unavailable. It is fetched when the
+widget is on **or** the background is Dither (the widget toggle then only
+hides the readout), and re-checked every 10 minutes while the tab stays open.
 
 ## Design Tokens
 **Fonts:** `Instrument Serif` (clock + modal titles), `Hanken Grotesk` (UI/body),
@@ -348,6 +394,7 @@ hides) if geolocation is denied/unavailable.
 - scrim: `linear-gradient(180deg, rgba(8,10,16,.45), rgba(8,10,16,.62))`
 
 **Solid swatches:** `#f4f1ea #e7e0d3 #d8cfc0 #c9c3b6 #2b2a27 #1c1a17 #13233a #1a2b22`
+(+ any custom colour; shared by Solid and Dither)
 
 **Adaptive gradients (by local hour):**
 - 05–08 `linear-gradient(165deg,#c7d2ec,#e9d6c4)` (light text)
@@ -371,7 +418,7 @@ links `gap 12px`; footer `padding-bottom 30px`.
 ## Files
 - `Home.html` — markup shell + font links + script/style includes.
 - `home.css` — full token system + all component styles.
-- `home.js` — state/persistence, rendering, drag-reorder, modals, weather,
+- `home.js` — state/persistence, rendering, dither background, drag-reorder, modals, weather,
   inline SVG glyphs. Single IIFE, no dependencies.
 
 ## Notes for implementers
