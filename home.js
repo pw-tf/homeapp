@@ -36,6 +36,12 @@
     showRecent: true,
   };
 
+  // phone-width layout (short date) and hover-less touch screens (no drag,
+  // press-and-hold to edit links, no auto-focus); kept in step with home.css
+  const NARROW = matchMedia("(max-width: 640px)");
+  const TOUCH = matchMedia("(hover: none)");
+  TOUCH.addEventListener("change", () => renderLinks());
+
   /* ----- state ---------------------------------------------------------- */
   let config = structuredClone(DEFAULT_CONFIG);
   let links = [];
@@ -47,6 +53,7 @@
     try { const c = JSON.parse(localStorage.getItem(LS.config)); if (c) config = Object.assign(structuredClone(DEFAULT_CONFIG), c, { bg: Object.assign({}, DEFAULT_CONFIG.bg, c.bg), weather: Object.assign({}, DEFAULT_CONFIG.weather, c.weather) }); } catch (e) {}
     try { const l = JSON.parse(localStorage.getItem(LS.links)); links = Array.isArray(l) ? l : structuredClone(DEFAULT_LINKS); } catch (e) { links = structuredClone(DEFAULT_LINKS); }
     if (!links.length) links = structuredClone(DEFAULT_LINKS);
+    links.forEach((x) => { if (x && x.type === "folder" && !Array.isArray(x.children)) x.children = []; });
     try { const r = JSON.parse(localStorage.getItem(LS.recent)); recent = Array.isArray(r) ? r : []; } catch (e) { recent = []; }
   }
   const saveConfig = () => localStorage.setItem(LS.config, JSON.stringify(config));
@@ -106,20 +113,23 @@
 
   function applyBackground() {
     const b = document.body;
+    const root = document.documentElement.style;
     const m = config.bg.mode;
-    b.style.backgroundImage = "none";
+    // the image / gradient paints on a fixed layer (body::before) so it stays
+    // put when a phone-length page scrolls
+    root.setProperty("--bg-image", "none");
     b.style.backgroundColor = "";
-    document.documentElement.style.setProperty("--bg", "#f4f1ea");
+    root.setProperty("--bg", "#f4f1ea");
     if (m === "paper") {
       b.style.backgroundColor = "#f4f1ea";
     } else if (m === "solid") {
       b.style.backgroundColor = config.bg.color || "#f4f1ea";
     } else if (m === "image" && config.bg.imageUrl) {
       b.style.backgroundColor = "#15171c";
-      b.style.backgroundImage = `url("${config.bg.imageUrl}")`;
+      root.setProperty("--bg-image", `url("${config.bg.imageUrl}")`);
     } else if (m === "adaptive") {
       const a = adaptiveSlot();
-      b.style.backgroundImage = a.bg;
+      root.setProperty("--bg-image", a.bg);
     } else {
       b.style.backgroundColor = "#f4f1ea";
     }
@@ -268,7 +278,8 @@
     const nm = config.name ? `, ${config.name}` : "";
     $("#greeting").textContent = `Good ${part}${nm}`;
 
-    $("#date").textContent = now.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric", year: "numeric" }).replace(",", " ·");
+    const len = NARROW.matches ? "short" : "long";
+    $("#date").textContent = now.toLocaleDateString(undefined, { weekday: len, month: len, day: "numeric", year: "numeric" }).replace(",", " ·");
 
     if (config.bg.mode === "adaptive") { document.documentElement.dataset.theme = resolveTheme(); applyBackground(); }
   }
@@ -288,28 +299,167 @@
     saveRecent();
   }
 
+  /* ----- links & folders ------------------------------------------------ */
+  // `links` is the main row, in order. An entry is a link or a folder:
+  // { id, type: "folder", name, icon: { kind: "glyph" | "emoji", value }, children: [link…] }.
+  // Folders hold links only (one level deep).
+  const isFolder = (x) => !!x && x.type === "folder";
+  const allLinks = () => links.flatMap((x) => (isFolder(x) ? x.children : [x]));
+  const folderById = (id) => links.find((x) => isFolder(x) && x.id === id) || null;
+  const listOf = (folderId) => (folderId ? (folderById(folderId) || {}).children : links);
+  const countLabel = (n) => (n === 1 ? "1 link" : `${n} links`);
+  // where a link lives: { list, index, folder } (folder is null on the main row)
+  function locate(id) {
+    let i = links.findIndex((x) => x.id === id);
+    if (i >= 0) return { list: links, index: i, folder: null };
+    for (const f of links.filter(isFolder)) {
+      i = f.children.findIndex((l) => l.id === id);
+      if (i >= 0) return { list: f.children, index: i, folder: f };
+    }
+    return null;
+  }
+
+  function makeFolderTile(folder, open) {
+    const t = h("div", { class: "tile folder-tile" });
+    if (folder.icon && folder.icon.kind === "emoji" && folder.icon.value) t.append(h("span", { class: "emoji" }, folder.icon.value));
+    else t.innerHTML = open ? FOLDER_OPEN : FOLDER;
+    return t;
+  }
+
+  // the edit / remove pair revealed on hover
+  function cardActions(onEdit, onRemove, removeLabel = "Remove") {
+    const btn = (title, html, fn) => h("button", { type: "button", title, "aria-label": title, html, onclick: (e) => { e.preventDefault(); e.stopPropagation(); fn(); } });
+    return h("div", { class: "card-actions" }, btn("Edit", PENCIL, onEdit), btn(removeLabel, XICON, onRemove));
+  }
+
   function renderLinks() {
     const wrap = $("#links");
     wrap.innerHTML = "";
-    links.forEach((link, i) => {
-      const card = h("a", {
-        class: "link-card", href: link.url || "#", "data-index": i, draggable: "true",
-        onclick: (e) => { if (e.target.closest(".card-actions")) { e.preventDefault(); return; } recordRecent(link.id); },
-      });
-      card.append(makeTile(link), h("span", { class: "name" }, link.name || "Untitled"));
-      const actions = h("div", { class: "card-actions" },
-        h("button", { type: "button", title: "Edit", "aria-label": "Edit", onclick: (e) => { e.preventDefault(); e.stopPropagation(); openLinkModal(link); }, html: PENCIL }),
-        h("button", { type: "button", title: "Remove", "aria-label": "Remove", onclick: (e) => { e.preventDefault(); e.stopPropagation(); deleteLink(link.id); }, html: XICON }));
-      card.append(actions);
-      attachDrag(card, i);
-      wrap.append(card);
+    links.forEach((item, i) => wrap.append(isFolder(item) ? folderCard(item, i) : linkCard(item, i)));
+    wrap.append(
+      h("button", { class: "add-card", type: "button", onclick: () => openLinkModal(null) }, h("span", { html: PLUS }), "Add link"),
+      h("button", { class: "add-card", type: "button", onclick: () => openFolderModal(null) }, h("span", { html: FOLDER_PLUS }), "New folder"));
+    if (bubbleEl) renderBubble(false);
+  }
+
+  function linkCard(link, i) {
+    const card = h("a", {
+      class: "link-card", href: link.url || "#", draggable: String(!TOUCH.matches),
+      onclick: (e) => { if (e.target.closest(".card-actions")) { e.preventDefault(); return; } recordRecent(link.id); },
+    }, makeTile(link), h("span", { class: "name" }, link.name || "Untitled"), cardActions(() => openLinkModal(link), () => deleteLink(link.id)));
+    if (TOUCH.matches) attachLongPress(card, () => openLinkModal(link)); else attachDrag(card, null, i);
+    return card;
+  }
+
+  // a div (not a <button>) so it can hold the edit / remove buttons
+  function folderCard(folder, i) {
+    const open = openFolder === folder.id;
+    const card = h("div", {
+      class: "link-card folder-card", role: "button", tabindex: "0", "data-id": folder.id, draggable: String(!TOUCH.matches),
+      "aria-haspopup": "true", "aria-expanded": String(open), "aria-label": `${folder.name || "Folder"}, ${countLabel(folder.children.length)}`,
+      onclick: (e) => { if (!e.target.closest(".card-actions")) toggleBubble(folder.id, false); },
+      onkeydown: (e) => { if (e.target === card && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); toggleBubble(folder.id, true); } },
+    }, makeFolderTile(folder, open), h("span", { class: "name" }, folder.name || "Folder"),
+      h("span", { class: "folder-count", "aria-hidden": "true" }, String(folder.children.length)),
+      cardActions(() => openFolderModal(folder), () => deleteFolder(folder.id), "Remove folder"));
+    if (TOUCH.matches) attachLongPress(card, () => openFolderModal(folder)); else attachDrag(card, null, i);
+    return card;
+  }
+
+  /* ----- folder bubble -------------------------------------------------- */
+  // Clicking a folder opens its links in a speech bubble above it (below, if
+  // there's no room above), its tail pointing at the folder. It lives in
+  // .app, positioned in page coordinates, so it scrolls with the page.
+  // Clicking anywhere else, Esc, or the folder again closes it.
+  let openFolder = null, bubbleEl = null;
+
+  function toggleBubble(id, viaKeyboard) {
+    if (openFolder === id) { closeBubble(viaKeyboard); return; }
+    if (bubbleEl) bubbleEl.remove();
+    bubbleEl = null;
+    openFolder = id;
+    syncFolderCards();
+    renderBubble(true);
+    if (viaKeyboard && bubbleEl) { const first = bubbleEl.querySelector(".bubble-item"); if (first) first.focus(); }
+  }
+
+  function closeBubble(focusCard) {
+    const b = bubbleEl, id = openFolder;
+    if (!b) return;
+    bubbleEl = null; openFolder = null;
+    syncFolderCards();
+    b.classList.add("closing");
+    b.addEventListener("animationend", (e) => { if (e.target === b) b.remove(); });
+    setTimeout(() => b.remove(), 300); // in case the animation never runs
+    if (focusCard) { const c = $(`.folder-card[data-id="${id}"]`); if (c) c.focus(); }
+  }
+
+  // open state on the folder cards without re-rendering the row (which would
+  // flash every favicon back to its letter)
+  function syncFolderCards() {
+    document.querySelectorAll(".folder-card").forEach((c) => {
+      const f = folderById(c.dataset.id), open = c.dataset.id === openFolder;
+      c.setAttribute("aria-expanded", String(open));
+      if (f) c.querySelector(".tile").replaceWith(makeFolderTile(f, open));
     });
-    wrap.append(h("button", { class: "add-card", type: "button", onclick: () => openLinkModal(null) }, h("span", { html: PLUS }), "Add link"));
+  }
+
+  // animate: true on open; false when re-rendering an open bubble after an edit
+  function renderBubble(animate) {
+    const folder = folderById(openFolder);
+    const card = folder && $(`.folder-card[data-id="${folder.id}"]`);
+    if (!card) { if (bubbleEl) bubbleEl.remove(); bubbleEl = null; openFolder = null; return; }
+
+    const grid = h("div", { class: "bubble-grid" });
+    folder.children.forEach((link, j) => grid.append(bubbleItem(link, folder.id, j)));
+    grid.append(h("button", { class: "bubble-item bubble-add", type: "button", onclick: () => openLinkModal(null, folder.id) },
+      h("span", { class: "tile", html: PLUS }), h("span", { class: "name" }, "Add link")));
+    [...grid.children].forEach((el, j) => el.style.setProperty("--i", j)); // stagger
+
+    const b = h("div", { class: "bubble" + (animate ? "" : " static"), role: "group", "aria-label": `${folder.name || "Folder"} folder` },
+      h("div", { class: "bubble-head" },
+        h("span", { class: "bubble-title" }, folder.name || "Folder"),
+        h("span", { class: "bubble-count" }, countLabel(folder.children.length)),
+        h("button", { class: "bubble-edit", type: "button", title: "Edit folder", "aria-label": "Edit folder", html: PENCIL, onclick: () => openFolderModal(folder) })),
+      grid);
+    attachDropZone(b, folder.id);
+    if (bubbleEl) bubbleEl.replaceWith(b); else $(".app").append(b);
+    bubbleEl = b;
+    placeBubble();
+  }
+
+  function bubbleItem(link, folderId, j) {
+    const item = h("a", {
+      class: "bubble-item", href: link.url || "#", draggable: String(!TOUCH.matches),
+      onclick: (e) => { if (e.target.closest(".card-actions")) { e.preventDefault(); return; } recordRecent(link.id); },
+    }, makeTile(link), h("span", { class: "name" }, link.name || "Untitled"), cardActions(() => openLinkModal(link), () => deleteLink(link.id)));
+    if (TOUCH.matches) attachLongPress(item, () => openLinkModal(link)); else attachDrag(item, folderId, j);
+    return item;
+  }
+
+  // centre over the folder, kept inside the page gutters; the tail tracks the
+  // folder's centre even when the bubble is pushed sideways
+  function placeBubble() {
+    const b = bubbleEl, card = b && $(`.folder-card[data-id="${openFolder}"]`);
+    if (!card) return;
+    const app = $(".app").getBoundingClientRect(), c = card.getBoundingClientRect();
+    const vw = document.documentElement.clientWidth, gutter = 16, gap = 13;
+    const w = Math.min(400, vw - gutter * 2);
+    b.style.width = w + "px";
+    const cx = c.left + c.width / 2;
+    const left = Math.max(gutter, Math.min(cx - w / 2, vw - gutter - w));
+    const below = c.top - gap - b.offsetHeight < 8;
+    const top = below ? c.bottom + gap : c.top - gap - b.offsetHeight;
+    b.classList.toggle("below", below);
+    b.style.left = left - app.left + "px";
+    b.style.top = top - app.top + "px";
+    b.style.setProperty("--tail-x", Math.max(24, Math.min(cx - left, w - 24)) + "px");
   }
 
   function renderRecent() {
     const el = $("#recent");
-    const items = recent.map((id) => links.find((l) => l.id === id)).filter(Boolean);
+    const all = allLinks();
+    const items = recent.map((id) => all.find((l) => l.id === id)).filter(Boolean);
     if (!config.showRecent || !items.length) { el.classList.add("hidden"); el.innerHTML = ""; return; }
     el.classList.remove("hidden");
     el.innerHTML = "";
@@ -319,22 +469,73 @@
 
   function renderAll() { applyBackground(); renderClock(); renderEngine(); renderLinks(); renderRecent(); renderWeather(); }
 
-  /* ----- drag to reorder ------------------------------------------------ */
-  let dragFrom = null;
-  function attachDrag(card, index) {
-    card.addEventListener("dragstart", (e) => { dragFrom = index; card.classList.add("dragging"); e.dataTransfer.effectAllowed = "move"; try { e.dataTransfer.setData("text/plain", String(index)); } catch (x) {} });
-    card.addEventListener("dragend", () => { dragFrom = null; card.classList.remove("dragging"); document.querySelectorAll(".link-card").forEach((c) => c.classList.remove("drag-over")); });
-    card.addEventListener("dragover", (e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; card.classList.add("drag-over"); });
-    card.addEventListener("dragleave", () => card.classList.remove("drag-over"));
-    card.addEventListener("drop", (e) => {
-      e.preventDefault();
-      card.classList.remove("drag-over");
-      const to = index;
-      if (dragFrom == null || dragFrom === to) return;
-      const [moved] = links.splice(dragFrom, 1);
-      links.splice(to, 0, moved);
-      saveLinks(); renderLinks(); renderRecent();
+  /* ----- drag to reorder / file into folders ----------------------------- */
+  // The dragged entry is { folder, index } (folder null = the main row).
+  // Dropped on a main-row card it takes that card's place; a link dropped on
+  // a folder card goes inside it; on a link in the open bubble it takes that
+  // link's place; on empty space in the row or the bubble it goes to the end.
+  let drag = null;
+  const clearDragOver = () => document.querySelectorAll(".drag-over").forEach((c) => c.classList.remove("drag-over"));
+
+  // where dropping on (folderId, index) sends the dragged entry, or null if
+  // it can't go there; index null = the list's empty space
+  function dropTarget(folderId, index) {
+    const item = drag && (listOf(drag.folder) || [])[drag.index];
+    if (!item || (isFolder(item) && folderId)) return null; // folders stay on the main row
+    const target = index == null ? null : listOf(folderId)[index];
+    if (isFolder(target) && !isFolder(item)) return target.id === drag.folder ? null : { folder: target.id, index: Infinity };
+    if (index == null) return { folder: folderId, index: Infinity };
+    if (folderId === drag.folder && index === drag.index) return null;
+    return { folder: folderId, index };
+  }
+
+  function dropHere(e, folderId, index) {
+    e.preventDefault(); e.stopPropagation(); clearDragOver();
+    const t = dropTarget(folderId, index), src = drag;
+    drag = null;
+    if (!t) return;
+    const from = listOf(src.folder), to = listOf(t.folder);
+    const [moved] = from.splice(src.index, 1);
+    to.splice(Math.min(t.index, to.length), 0, moved);
+    saveLinks(); renderLinks(); renderRecent();
+  }
+
+  function attachDrag(el, folderId, index) {
+    el.addEventListener("dragstart", (e) => { drag = { folder: folderId, index }; el.classList.add("dragging"); e.dataTransfer.effectAllowed = "move"; try { e.dataTransfer.setData("text/plain", String(index)); } catch (x) {} });
+    el.addEventListener("dragend", () => { drag = null; el.classList.remove("dragging"); clearDragOver(); });
+    el.addEventListener("dragover", (e) => {
+      e.stopPropagation(); // a card is never its container's empty space
+      if (!dropTarget(folderId, index)) return;
+      e.preventDefault(); e.dataTransfer.dropEffect = "move"; el.classList.add("drag-over");
     });
+    el.addEventListener("dragleave", (e) => { if (!el.contains(e.relatedTarget)) el.classList.remove("drag-over"); });
+    el.addEventListener("drop", (e) => dropHere(e, folderId, index));
+  }
+
+  // the row / bubble itself, for drops on empty space
+  function attachDropZone(el, folderId) {
+    el.addEventListener("dragover", (e) => { if (!dropTarget(folderId, null)) return; e.preventDefault(); e.dataTransfer.dropEffect = "move"; el.classList.add("drag-over"); });
+    el.addEventListener("dragleave", (e) => { if (!el.contains(e.relatedTarget)) el.classList.remove("drag-over"); });
+    el.addEventListener("drop", (e) => dropHere(e, folderId, null));
+  }
+
+  /* ----- touch: press and hold a card to edit it ------------------------- */
+  // Touch screens have no hover to reveal the edit / remove buttons (and a
+  // long press would otherwise start a drag or the browser's link menu), so
+  // holding a card opens its edit sheet instead; Delete lives in there.
+  function attachLongPress(card, onHold) {
+    let timer = null, x = 0, y = 0, fired = false;
+    const cancel = () => { clearTimeout(timer); timer = null; };
+    card.addEventListener("touchstart", (e) => {
+      cancel(); fired = false;
+      if (e.touches.length !== 1) return;
+      x = e.touches[0].clientX; y = e.touches[0].clientY;
+      timer = setTimeout(() => { timer = null; fired = true; if (navigator.vibrate) navigator.vibrate(10); onHold(); }, 500);
+    }, { passive: true });
+    card.addEventListener("touchmove", (e) => { const t = e.touches[0]; if (Math.hypot(t.clientX - x, t.clientY - y) > 10) cancel(); }, { passive: true });
+    card.addEventListener("touchend", (e) => { cancel(); if (fired) e.preventDefault(); });
+    card.addEventListener("touchcancel", cancel);
+    card.addEventListener("contextmenu", (e) => e.preventDefault());
   }
 
   /* ----- modals --------------------------------------------------------- */
@@ -344,7 +545,8 @@
     overlay.id = "overlay";
     document.body.append(overlay);
     document.addEventListener("keydown", escClose);
-    const f = overlay.querySelector("input, button, [tabindex]"); if (f) setTimeout(() => f.focus(), 30);
+    // on touch screens focusing a field would throw the keyboard up over the sheet
+    const f = !TOUCH.matches && overlay.querySelector("input, button, [tabindex]"); if (f) setTimeout(() => f.focus(), 30);
   }
   function closeModal() { const o = $("#overlay"); if (o) o.remove(); document.removeEventListener("keydown", escClose); }
   function escClose(e) { if (e.key === "Escape") closeModal(); }
@@ -356,11 +558,21 @@
   }
 
   // ----- Add / Edit link -----
-  function openLinkModal(existing) {
+  // inFolder: the folder a new link starts in (from a bubble's "Add link")
+  function openLinkModal(existing, inFolder) {
     const editing = !!existing;
     const draft = editing
       ? { id: existing.id, name: existing.name, url: existing.url, icon: Object.assign({ kind: "auto", value: "" }, existing.icon) }
       : { id: uid(), name: "", url: "", icon: { kind: "auto", value: "" } };
+    const at = editing ? locate(existing.id) : null;
+    let dest = at ? (at.folder ? at.folder.id : "") : (inFolder || "");
+
+    // folder picker, only once there are folders to pick
+    const folders = links.filter(isFolder);
+    const folderSelect = folders.length ? h("select", { onchange: (e) => { dest = e.target.value; } },
+      h("option", { value: "" }, "None (main row)"),
+      folders.map((f) => h("option", { value: f.id }, f.name || "Folder"))) : null;
+    if (folderSelect) folderSelect.value = dest;
 
     const nameInput = h("input", { type: "text", value: draft.name, placeholder: "GitHub", oninput: (e) => { draft.name = e.target.value; redrawPreview(); } });
     const urlInput  = h("input", { type: "url",  value: draft.url,  placeholder: "github.com", oninput: (e) => { draft.url = e.target.value; if (draft.icon.kind === "auto") redrawPreview(); } });
@@ -400,10 +612,11 @@
 
     const sheet = h("div", { class: "sheet" },
       h("h2", {}, editing ? "Edit link" : "Add link"),
-      h("p", { class: "sub" }, editing ? "Update the name, address, or icon." : "Add a shortcut to your home page."),
+      h("p", { class: "sub" }, editing ? "Update the name, address, or icon." : inFolder && folderById(inFolder) ? `Add a shortcut to ${folderById(inFolder).name || "this folder"}.` : "Add a shortcut to your home page."),
       h("div", { class: "icon-preview" }, previewTileSlot, pvMeta),
       h("div", { class: "field" }, h("label", {}, "Name"), nameInput),
       h("div", { class: "field" }, h("label", {}, "URL"), urlInput),
+      folderSelect ? h("div", { class: "field" }, h("label", {}, "Folder"), folderSelect) : null,
       h("div", { class: "field" },
         h("label", {}, "Icon"),
         seg([{ value: "auto", label: "Auto" }, { value: "emoji", label: "Emoji" }, { value: "image", label: "Image" }, { value: "letter", label: "Letter" }], draft.icon.kind, (v) => { draft.icon.kind = v; rerenderIconSeg(v); renderIconControls(); redrawPreview(); }),
@@ -422,8 +635,11 @@
     function save() {
       draft.name = (draft.name || "").trim() || domainOf(normalizeUrl(draft.url)) || "Untitled";
       draft.url = normalizeUrl(draft.url);
-      if (editing) { const i = links.findIndex((l) => l.id === draft.id); if (i >= 0) links[i] = draft; }
-      else links.push(draft);
+      // same place: replace in position; another folder / the row: move to its end
+      const now = editing ? locate(draft.id) : null;
+      const target = listOf(dest) || links;
+      if (now && now.list === target) now.list[now.index] = draft;
+      else { if (now) now.list.splice(now.index, 1); target.push(draft); }
       saveLinks(); renderLinks(); renderRecent(); closeModal();
     }
 
@@ -433,9 +649,74 @@
   }
 
   function deleteLink(id) {
-    links = links.filter((l) => l.id !== id);
+    const at = locate(id);
+    if (at) at.list.splice(at.index, 1);
     recent = recent.filter((x) => x !== id);
     saveLinks(); saveRecent(); renderLinks(); renderRecent();
+  }
+
+  // removing a folder keeps its links: they go back onto the row in its place
+  function deleteFolder(id) {
+    const i = links.findIndex((x) => x.id === id);
+    if (i < 0) return;
+    if (openFolder === id) closeBubble(false);
+    links.splice(i, 1, ...links[i].children);
+    saveLinks(); renderLinks(); renderRecent();
+  }
+
+  // ----- New / Edit folder -----
+  function openFolderModal(existing) {
+    const editing = !!existing;
+    const draft = { name: editing ? existing.name : "", icon: Object.assign({ kind: "glyph", value: "" }, editing ? existing.icon : null) };
+
+    const previewTileSlot = h("div", { class: "tile folder-tile" });
+    const redrawPreview = () => { previewTileSlot.innerHTML = makeFolderTile(draft, false).innerHTML; };
+
+    const iconControls = h("div", {});
+    function renderIconControls() {
+      iconControls.innerHTML = "";
+      if (draft.icon.kind === "emoji") {
+        const inp = h("input", { type: "text", value: draft.icon.value || "", placeholder: "Paste or pick an emoji", maxlength: "4", oninput: (e) => { draft.icon.value = e.target.value; redrawPreview(); } });
+        const grid = h("div", { class: "emoji-grid" });
+        EMOJIS.forEach((em) => grid.append(h("button", { type: "button", onclick: () => { draft.icon.value = em; inp.value = em; redrawPreview(); } }, em)));
+        iconControls.append(inp, grid);
+      } else {
+        iconControls.append(h("p", { class: "hint" }, "A plain folder glyph, which opens when its bubble does."));
+      }
+    }
+
+    const iconSeg = seg([{ value: "glyph", label: "Folder" }, { value: "emoji", label: "Emoji" }], draft.icon.kind, (v) => {
+      draft.icon.kind = v;
+      [...iconSeg.children].forEach((b, i) => b.classList.toggle("active", ["glyph", "emoji"][i] === v));
+      renderIconControls(); redrawPreview();
+    });
+
+    const sheet = h("div", { class: "sheet" },
+      h("h2", {}, editing ? "Edit folder" : "New folder"),
+      h("p", { class: "sub" }, editing ? "Rename it or change its icon." : "Group links under one card. Click it to open them in a bubble."),
+      h("div", { class: "icon-preview" }, previewTileSlot, h("div", { class: "pv-meta" }, h("b", {}, "Preview"), h("span", {}, editing ? countLabel(existing.children.length) : "Empty for now"))),
+      h("div", { class: "field" }, h("label", {}, "Name"),
+        h("input", { type: "text", value: draft.name, placeholder: "Work", oninput: (e) => { draft.name = e.target.value; } })),
+      h("div", { class: "field" }, h("label", {}, "Icon"), iconSeg, iconControls),
+      editing ? h("p", { class: "hint" }, "Deleting a folder keeps its links: they move back to the main row.") : null,
+      h("div", { class: "actions" },
+        editing ? h("button", { class: "btn btn-danger spacer", type: "button", onclick: () => { closeModal(); deleteFolder(existing.id); } }, "Delete") : null,
+        h("button", { class: "btn btn-ghost", type: "button", onclick: closeModal }, "Cancel"),
+        h("button", { class: "btn btn-primary", type: "button", onclick: save }, editing ? "Save" : "Create folder")));
+
+    function save() {
+      const name = (draft.name || "").trim() || "Folder";
+      const icon = draft.icon.kind === "emoji" && draft.icon.value ? draft.icon : { kind: "glyph", value: "" };
+      const id = editing ? existing.id : uid();
+      if (editing) Object.assign(existing, { name, icon });
+      else links.push({ id, type: "folder", name, icon, children: [] });
+      saveLinks(); closeModal(); renderLinks();
+      if (!editing) toggleBubble(id, false); // open it, ready for "Add link"
+    }
+
+    renderIconControls();
+    openModal(sheet);
+    redrawPreview();
   }
 
   // ----- Settings -----
@@ -740,7 +1021,7 @@
       const g = weatherGlyph(data.code);
       el.classList.remove("hidden");
       el.innerHTML = "";
-      el.append(h("span", { html: g.svg }), h("span", {}, `${data.temp}° ${g.label}`));
+      el.append(h("span", { html: g.svg }), h("span", {}, `${data.temp}°`), h("span", { class: "weather-label" }, g.label));
       return;
     }
     // try cache, else fetch
@@ -951,6 +1232,9 @@
   const GEAR   = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>`;
   const MAG    = `<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.5" y2="16.5"/></svg>`;
   const CHEV   = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="opacity:.7"><polyline points="6 9 12 15 18 9"/></svg>`;
+  const FOLDER = `<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4.3l2 2.2h8.7A1.5 1.5 0 0 1 21 9.7v8.8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5Z"/></svg>`;
+  const FOLDER_OPEN = `<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round" stroke-linecap="round"><path d="M3 18.5v-11A1.5 1.5 0 0 1 4.5 6h4.3l2 2.2h7.2a1.5 1.5 0 0 1 1.5 1.5V11"/><path d="M3 18.5 5.4 12a1.5 1.5 0 0 1 1.4-1h13.5a1 1 0 0 1 .95 1.3l-2 6.6a1.5 1.5 0 0 1-1.44 1.1H4.5A1.5 1.5 0 0 1 3 18.5Z"/></svg>`;
+  const FOLDER_PLUS = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4.3l2 2.2h8.7A1.5 1.5 0 0 1 21 9.7v8.8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5Z"/><line x1="12" y1="11.5" x2="12" y2="16.5"/><line x1="9.5" y1="14" x2="14.5" y2="14"/></svg>`;
   // notes toolbar (Lucide-style, 16px)
   const tb = (paths) => `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${paths}</svg>`;
   const ICON_H1        = tb(`<path d="M4 12h8"/><path d="M4 18V6"/><path d="M12 18V6"/><path d="m17 12 3-2v8"/>`);
@@ -1006,12 +1290,24 @@
     // buttons
     $("#settings-btn").addEventListener("click", openSettingsModal);
 
+    // folders: drops on the row's empty space; the bubble closes on a click
+    // anywhere off it (capture phase, and click rather than pointerdown so a
+    // drag from the row into the open bubble doesn't close it) or on Esc
+    attachDropZone($("#links"), null);
+    document.addEventListener("click", (e) => {
+      if (!bubbleEl || bubbleEl.contains(e.target) || e.target.closest(".folder-card, #overlay")) return;
+      closeBubble(false);
+    }, true);
+    document.addEventListener("keydown", (e) => { if (e.key === "Escape" && bubbleEl && !$("#overlay")) closeBubble(true); });
+    window.addEventListener("resize", placeBubble);
+
     // Chrome new-tab: the browser grabs the address bar after the page loads,
     // overriding earlier focus() calls. Retrying at 300ms fires after Chrome's
     // omnibox sequence completes.
     const q = $("#q");
     // …but never pull focus away from the notes if they've already been clicked.
-    const reFocus = () => { if (!document.querySelector("#overlay") && document.activeElement !== notesEd) q.focus(); };
+    // (phones skip it: there's no omnibox to beat, and it would raise the keyboard)
+    const reFocus = () => { if (!TOUCH.matches && !document.querySelector("#overlay") && document.activeElement !== notesEd) q.focus(); };
     reFocus();
     setTimeout(reFocus, 300);
   }

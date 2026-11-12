@@ -47,7 +47,16 @@ Link, Settings). The page is a single full-viewport column.
   `clamp(28px, 3.5vw, 56px)`) holds the page on the left and the notes panel
   on the right (radar card on top, notes filling the rest). At ≤960px the grid
   collapses to one column and the radar + notes drop below the links, notes at
-  `min(460px, 70vh)` tall.
+  `min(460px, 70vh)` tall. At ≤640px (phones): short date (`THU · 12 NOV
+  2026`), weather shows glyph + temperature only, links become an even
+  two-up grid with clipped names, the radar goes full width and modals become
+  bottom sheets. The wallpaper paints on a fixed `body::before` layer
+  (`--bg-image`) so it stays put while the stacked page scrolls.
+  - **Touch screens** (`hover: none`): no hover edit/remove buttons and no
+    drag-reorder; **press and hold a link (500ms) to edit it** (Delete is in
+    the sheet). Search and modal fields aren't auto-focused, so the keyboard
+    doesn't pop up. Coarse pointers get larger targets and 16px fields (stops
+    iOS zoom-on-focus).
   - **Masthead** (top, fixed height): space-between row. Left = date label.
     Right = weather readout + settings (gear) icon button. A 1px hairline rule
     sits directly beneath.
@@ -95,6 +104,23 @@ Link, Settings). The page is a single full-viewport column.
     emoji at 16px; letter at 13px/600 in `--tile-ink`.
   - **Add link button** — dashed `--card-border` border, radius 12px, padding
     `9px 18px`, `--ink-soft`; "+" SVG + `Add link`. Hover firms the border.
+    A second dashed **New folder** button sits beside it.
+  - **Folder card** — same card as a link (`.link-card.folder-card`, a
+    `div role="button"`), with a folder-glyph tile (outline glyph in
+    `--tile-ink`, swapping to an open-folder glyph while open; or an emoji),
+    the name, and a mono count pill. Hover edit / remove like links; removing
+    a folder puts its links back on the row in its place.
+  - **Folder bubble** — clicking a folder opens its links in a paper
+    (`#fbf9f4`) speech bubble above it (below if there's no room), max 400px
+    wide and kept 16px inside the window, radius 18px, with a rotated-square
+    tail pointing at the folder's centre. Head: serif name (25px) +
+    `N LINKS` mono count + pencil (edit folder). Body: a grid of icon-over-
+    name items (40px tiles), ending in a dashed `Add link` item that adds
+    straight into the folder. Opens by growing from the tail tip
+    (`scale .86 → 1`, 0.34s with a slight overshoot) with the items staggered
+    in 24ms apart; closes in 0.17s. Closes on a click anywhere off it, Esc
+    (focus returns to the folder), or clicking the folder again. Folders are
+    one level deep (they hold links only).
 
 - **Notes panel** — card in `--card-bg` / `--card-border`, radius 16px, glass
   blur in dark mode; top/bottom margins (`24px` / `30px`) line up with the hero
@@ -224,9 +250,14 @@ Same sheet styling. Sections, top to bottom:
 - **Add/Edit/Delete links:** via the modal; Delete also purges the id from
   recents. Empty name falls back to the URL's hostname, else "Untitled".
 - **Drag to reorder:** link cards are `draggable`. HTML5 DnD — `dragstart`
-  records the source index + adds `.dragging` (opacity .4); `dragover`
-  highlights the target with `.drag-over` (accent border); `drop` splices the
-  array and re-renders + persists.
+  records the source (`{ folder, index }`) + adds `.dragging` (opacity .4);
+  `dragover` highlights the target with `.drag-over` (accent border); `drop`
+  splices the arrays and re-renders + persists. A link dropped on a folder
+  card goes inside it; links in an open bubble reorder within it, or drag
+  out onto the row (onto a card to take its place, empty space for the end).
+  Folders themselves only reorder on the row.
+- **Folder picker:** the Add/Edit link sheet gets a `Folder` select (None /
+  each folder) once any folder exists; this is how phones file links.
 - **Recents:** clicking a link unshifts its id into a deduped list capped at 6;
   rendered as up to 5 text links. Toggleable.
 - **Modals:** open with an overlay fade (0.18s) + sheet rise (0.22s
@@ -269,7 +300,8 @@ only swaps it in `onload` when `naturalWidth > 1`. Resolution order:
 All client-side, persisted to `localStorage`:
 - `nt_config` → `{ name, engine, appearance, bg:{mode,color,imageUrl},
   weather:{enabled,unit}, showRecent }`
-- `nt_links` → `[{ id, name, url, icon:{kind,value} }]`
+- `nt_links` → `[{ id, name, url, icon:{kind,value} } | { id, type:"folder",
+  name, icon:{kind:"glyph"|"emoji",value}, children:[link…] }]`
 - `nt_recent` → `[id, …]` (max 6)
 - `nt_weather` → `{ t, unit, data:{temp,code} }` (30-min cache)
 - `nt_palette` → `{ v: 2, url, palette: { shadow, mid, high } }`, sampled from the image wallpaper for the radar
