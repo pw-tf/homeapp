@@ -242,7 +242,10 @@ Same sheet styling. Sections, top to bottom:
 - **Text & contrast** (segmented: Auto / Dark text / Light text) — overrides the
   auto light/dark theme decision.
 - divider
-- **Weather widget** toggle + **Temperature unit** segmented (°C / °F).
+- **Weather widget** toggle + **Temperature unit** segmented (°C / °F) +
+  **Location**: the current place (a town's name, "This device's location" or
+  "Not set"), a town search (text field + Find → up to 5 matches to pick from)
+  and a "Use this device's location" link.
 - **Show recent links** toggle.
 - actions: "Reset everything" (danger, left) + "Done" (primary, right).
 
@@ -363,16 +366,31 @@ All client-side, persisted to `localStorage`:
   name, icon:{kind:"glyph"|"emoji",value}, children:[link…] }]`
 - `nt_recent` → `[id, …]` (max 6)
 - `nt_weather` → `{ t, unit, data:{temp,code,isDay,wind,windDir} }` (30-min cache)
+- `nt_place` → `{ lat, lon, name?, asked }`: where the weather is for, to 2
+  decimals (about 1 km). `name` is set when it is a town picked in Settings;
+  `asked` records that the browser has been asked for a location. Cleared by
+  "Reset everything".
 - `nt_palette` → `{ v: 2, url, palette: { shadow, mid, high } }`, sampled from the image wallpaper for the radar
 - `nt_notes` → the notes editor's HTML (`""` when empty). "Reset everything"
   does not clear it.
 
-Weather: `navigator.geolocation.getCurrentPosition` →
+Weather: the place in `nt_place` →
 `api.open-meteo.com/v1/forecast?...current=temperature_2m,weather_code,is_day,wind_speed_10m,wind_direction_10m`
-(no API key). WMO `weather_code` is grouped to a glyph + label. Fails silently
-(widget hides) if geolocation is denied/unavailable. It is fetched when the
-widget is on **or** the background is Dither (the widget toggle then only
-hides the readout), and re-checked every 10 minutes while the tab stays open.
+(no API key). WMO `weather_code` is grouped to a glyph + label. It is fetched
+when the widget is on **or** the background is Dither (the widget toggle then
+only hides the readout), and re-checked every 10 minutes while the tab stays
+open.
+
+Location: the browser is asked (`navigator.geolocation.getCurrentPosition`)
+**once**, on the first load, and the answer is kept in `nt_place`. Some
+browsers allow the request and still return no position, or don't remember
+the answer, so the page never asks again on its own:
+- a town picked in Settings (`geocoding-api.open-meteo.com/v1/search`) is used
+  as it is;
+- a device location is refreshed only while the Permissions API reports
+  `granted`, i.e. when the browser will answer without a prompt;
+- with no place at all the readout becomes a "Set location" link that opens
+  Settings, and the Dither background keeps its calm drift.
 
 ## Design Tokens
 **Fonts:** `Instrument Serif` (clock + modal titles), `Hanken Grotesk` (UI/body),

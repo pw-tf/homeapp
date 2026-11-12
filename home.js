@@ -50,7 +50,7 @@
   let links = [];
   let recent = [];
 
-  const LS = { config: "nt_config", links: "nt_links", recent: "nt_recent", weather: "nt_weather", notes: "nt_notes", palette: "nt_palette" };
+  const LS = { config: "nt_config", links: "nt_links", recent: "nt_recent", weather: "nt_weather", place: "nt_place", notes: "nt_notes", palette: "nt_palette" };
 
   function load() {
     try { const c = JSON.parse(localStorage.getItem(LS.config)); if (c) config = Object.assign(structuredClone(DEFAULT_CONFIG), c, { bg: Object.assign({}, DEFAULT_CONFIG.bg, c.bg), weather: Object.assign({}, DEFAULT_CONFIG.weather, c.weather) }); } catch (e) {}
@@ -1178,7 +1178,7 @@
             h("div", { class: "field", style: { margin: "0" } },
               h("select", { "aria-label": "Conditions", onchange: (e) => { config.bg.ditherScene = e.target.value; saveConfig(); syncDither(); } },
                 scenes.map(([value, label]) => h("option", { value, selected: value === config.bg.ditherScene ? "" : null }, label))))),
-          h("p", { class: "hint" }, "A quiet dithered texture that moves with the weather outside — drifting when clear, falling as rain, settling as snow. Live weather needs location access; without it the pattern simply drifts."));
+          h("p", { class: "hint" }, "A quiet dithered texture that moves with the weather outside — drifting when clear, falling as rain, settling as snow. Live weather needs a location (set under Weather below); without one the pattern simply drifts."));
       } else {
         bgControls.append(h("p", { class: "hint", style: { marginTop: "10px" } }, "Warm off-white paper — the Editorial default."));
       }
@@ -1192,11 +1192,53 @@
     sheet.append(h("div", { class: "section-divider" }));
 
     // weather
+    const placeBox = h("div", {});
     const wToggle = h("button", { type: "button", class: "toggle" + (config.weather.enabled ? " on" : ""), role: "switch", "aria-checked": String(config.weather.enabled), onclick: () => { config.weather.enabled = !config.weather.enabled; wToggle.classList.toggle("on", config.weather.enabled); saveConfig(); renderWeather(); } });
     sheet.append(h("div", { class: "field" }, h("div", { class: "row" }, h("label", { style: { margin: "0" } }, "Weather widget"), wToggle),
       h("div", { class: "row", style: { marginTop: "12px" } },
         h("span", { class: "hint", style: { margin: "0" } }, "Temperature unit"),
-        seg([{ value: "c", label: "°C" }, { value: "f", label: "°F" }], config.weather.unit, (v) => { config.weather.unit = v; saveConfig(); localStorage.removeItem(LS.weather); renderWeather(); }))));
+        seg([{ value: "c", label: "°C" }, { value: "f", label: "°F" }], config.weather.unit, (v) => { config.weather.unit = v; saveConfig(); localStorage.removeItem(LS.weather); renderWeather(); })),
+      placeBox));
+
+    // location: the town the weather is for, searched by name, or the device's
+    // own position (asked for here, on a click, rather than on page load)
+    function renderPlace(note) {
+      const place = loadPlace();
+      const fromDevice = place.lat != null && !place.name;
+      const results = h("div", { class: "place-results" });
+      const say = (text) => { results.innerHTML = ""; results.append(h("p", { class: "hint" }, text)); };
+      const pick = (next) => { savePlace({ ...next, asked: true }); renderPlace(); renderWeather(); };
+      const input = h("input", { type: "text", placeholder: "Town or city", "aria-label": "Town or city", autocomplete: "off", onkeydown: (e) => { if (e.key === "Enter") { e.preventDefault(); find(); } } });
+      async function find() {
+        const q = input.value.trim();
+        if (!q) return;
+        say("Searching…");
+        try {
+          const r = await fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(q)}&count=5&language=en&format=json`);
+          const towns = (await r.json()).results || [];
+          if (!towns.length) return say("No town found by that name.");
+          results.innerHTML = "";
+          towns.forEach((t) => {
+            const name = [t.name, t.admin1, t.country].filter(Boolean).join(", ");
+            results.append(h("button", { type: "button", onclick: () => pick({ lat: +t.latitude.toFixed(2), lon: +t.longitude.toFixed(2), name }) }, name));
+          });
+        } catch (e) { say("Couldn't search just now. Check your connection and try again."); }
+      }
+      async function useDevice() {
+        const here = await devicePlace();
+        if (here) pick(here); else renderPlace("This browser couldn't provide a location. Type a town instead.");
+      }
+      placeBox.innerHTML = "";
+      placeBox.append(
+        h("div", { class: "row", style: { marginTop: "12px" } },
+          h("span", { class: "hint", style: { margin: "0" } }, "Location"),
+          h("span", { class: "place-now" }, place.name || (fromDevice ? "This device's location" : "Not set"))),
+        h("div", { class: "place-find" }, input, h("button", { class: "btn btn-ghost", type: "button", onclick: find }, "Find")),
+        results,
+        h("button", { class: "place-device", type: "button", onclick: useDevice }, fromDevice ? "Update from this device" : "Use this device's location"),
+        note ? h("p", { class: "hint" }, note) : "");
+    }
+    renderPlace();
 
     // recent toggle
     const rToggle = h("button", { type: "button", class: "toggle" + (config.showRecent ? " on" : ""), role: "switch", "aria-checked": String(config.showRecent), onclick: () => { config.showRecent = !config.showRecent; rToggle.classList.toggle("on", config.showRecent); saveConfig(); renderRecent(); } });
@@ -1216,6 +1258,7 @@
     recent = [];
     saveConfig(); saveLinks(); saveRecent();
     localStorage.removeItem(LS.weather);
+    localStorage.removeItem(LS.place);
     weatherNow = null;
     closeModal(); renderAll();
   }
@@ -1459,19 +1502,52 @@
     fetchWeather();
   }
 
-  function fetchWeather() {
-    if (!weatherWanted() || !navigator.geolocation) { $("#weather").classList.add("hidden"); return; }
-    navigator.geolocation.getCurrentPosition(async (pos) => {
-      try {
-        const { latitude, longitude } = pos.coords;
-        const unit = config.weather.unit === "f" ? "fahrenheit" : "celsius";
-        const r = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${latitude.toFixed(3)}&longitude=${longitude.toFixed(3)}&current=temperature_2m,weather_code,is_day,wind_speed_10m,wind_direction_10m&temperature_unit=${unit}`);
-        const c = (await r.json()).current;
-        const data = { temp: Math.round(c.temperature_2m), code: c.weather_code, isDay: c.is_day !== 0, wind: c.wind_speed_10m || 0, windDir: c.wind_direction_10m || 0 };
-        localStorage.setItem(LS.weather, JSON.stringify({ t: Date.now(), unit: config.weather.unit, data }));
-        renderWeather(data);
-      } catch (e) { $("#weather").classList.add("hidden"); }
-    }, () => { $("#weather").classList.add("hidden"); }, { maximumAge: 30 * 60 * 1000, timeout: 9000 });
+  // Where the weather is for: { lat, lon } to about 1 km, plus `name` when it
+  // is a town picked in Settings. It is kept so the browser is asked for a
+  // location once rather than on every new tab; `asked` records that it has
+  // been, whatever came of it (some browsers allow it and still can't say).
+  function loadPlace() { try { return JSON.parse(localStorage.getItem(LS.place)) || {}; } catch (e) { return {}; } }
+  function savePlace(place) { localStorage.setItem(LS.place, JSON.stringify(place)); localStorage.removeItem(LS.weather); return place; }
+
+  // the device's own position, or null if the browser can't or won't give it
+  const devicePlace = () => new Promise((done) => {
+    if (!navigator.geolocation) return done(null);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => done({ lat: +pos.coords.latitude.toFixed(2), lon: +pos.coords.longitude.toFixed(2) }),
+      () => done(null), { maximumAge: 30 * 60 * 1000, timeout: 9000 });
+  });
+  // "granted" | "prompt" | "denied", or "" where the browser doesn't say
+  const geoPermission = () => (navigator.permissions ? navigator.permissions.query({ name: "geolocation" }).then((p) => p.state, () => "") : Promise.resolve(""));
+
+  async function fetchWeather() {
+    const el = $("#weather");
+    if (!weatherWanted()) { el.classList.add("hidden"); return; }
+    let place = loadPlace();
+    // A device location is refreshed whenever the browser will give it without
+    // asking, and asked for outright only the first time. A chosen town stays.
+    if (!place.name) {
+      const state = await geoPermission();
+      if (state === "granted" || (!place.asked && state !== "denied")) {
+        if (!place.asked) place = savePlace({ ...place, asked: true }); // before asking: an unanswered prompt isn't repeated either
+        const here = await devicePlace();
+        if (here) place = savePlace({ ...here, asked: true });
+      }
+    }
+    if (place.lat == null) {
+      // nowhere to look up: the readout becomes the way in to Settings
+      el.classList.toggle("hidden", !config.weather.enabled);
+      el.innerHTML = "";
+      el.append(h("button", { class: "weather-set", type: "button", onclick: openSettingsModal }, "Set location"));
+      return;
+    }
+    try {
+      const unit = config.weather.unit === "f" ? "fahrenheit" : "celsius";
+      const r = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${place.lat}&longitude=${place.lon}&current=temperature_2m,weather_code,is_day,wind_speed_10m,wind_direction_10m&temperature_unit=${unit}`);
+      const c = (await r.json()).current;
+      const data = { temp: Math.round(c.temperature_2m), code: c.weather_code, isDay: c.is_day !== 0, wind: c.wind_speed_10m || 0, windDir: c.wind_direction_10m || 0 };
+      localStorage.setItem(LS.weather, JSON.stringify({ t: Date.now(), unit: config.weather.unit, data }));
+      renderWeather(data);
+    } catch (e) { el.classList.add("hidden"); }
   }
 
   /* ----- rain radar (BoM loop, pulled straight into the page) ------------ */
