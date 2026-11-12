@@ -1,6 +1,6 @@
 /* ==========================================================================
    Editorial New Tab — app logic (vanilla JS, no build step)
-   Sections: state · helpers · theme/background · tiles · render · drag ·
+   Sections: state · helpers · theme/background · dither · tiles · render · drag ·
    modals · notes · weather · init
    ========================================================================== */
 (function () {
@@ -31,7 +31,10 @@
     name: "",
     engine: "google",
     appearance: "auto",                                  // auto | light | dark
-    bg: { mode: "paper", color: "#f4f1ea", imageUrl: "" }, // paper | solid | image | adaptive
+    // mode: paper | solid | image | adaptive | dither. Dither draws over the
+    // colour or the image (ditherBase) and follows the live weather unless
+    // ditherScene pins it: live | clear | cloud | fog | rain | snow | storm
+    bg: { mode: "paper", color: "#f4f1ea", imageUrl: "", ditherBase: "color", ditherScene: "live" },
     weather: { enabled: true, unit: "c" },               // c | f
     showRecent: true,
   };
@@ -101,13 +104,19 @@
     return { bg: "linear-gradient(165deg,#0b1130 0%,#241a3a 100%)", theme: "dark" };
   }
 
+  // the wallpaper image in use: Image mode, or Dither drawn over an image
+  function bgImage() {
+    const g = config.bg;
+    return (g.mode === "image" || (g.mode === "dither" && g.ditherBase === "image")) && g.imageUrl ? g.imageUrl : "";
+  }
+
   function resolveTheme() {
     if (config.appearance === "light") return "light";
     if (config.appearance === "dark") return "dark";
     const m = config.bg.mode;
-    if (m === "image") return "dark";
+    if (m === "image" || bgImage()) return "dark";
     if (m === "adaptive") return adaptiveSlot().theme;
-    if (m === "solid") return luminance(config.bg.color) > 0.55 ? "light" : "dark";
+    if (m === "solid" || m === "dither") return luminance(config.bg.color) > 0.55 ? "light" : "dark";
     return "light"; // paper
   }
 
@@ -122,11 +131,11 @@
     root.setProperty("--bg", "#f4f1ea");
     if (m === "paper") {
       b.style.backgroundColor = "#f4f1ea";
-    } else if (m === "solid") {
-      b.style.backgroundColor = config.bg.color || "#f4f1ea";
-    } else if (m === "image" && config.bg.imageUrl) {
+    } else if (bgImage()) {
       b.style.backgroundColor = "#15171c";
-      root.setProperty("--bg-image", `url("${config.bg.imageUrl}")`);
+      root.setProperty("--bg-image", `url("${bgImage()}")`);
+    } else if (m === "solid" || m === "dither") {
+      b.style.backgroundColor = config.bg.color || "#f4f1ea";
     } else if (m === "adaptive") {
       const a = adaptiveSlot();
       root.setProperty("--bg-image", a.bg);
@@ -135,6 +144,7 @@
     }
     document.documentElement.dataset.theme = resolveTheme();
     updateRadarPalette();
+    syncDither();
   }
 
   /* ----- radar palette: repaint the radar map in the wallpaper's tones --- */
@@ -149,11 +159,12 @@
   // gives a dark map. An image is sampled once per URL and cached.
   const PALETTE_FALLBACK = { shadow: "#15171c", mid: "#2b2d31", high: "#6b6e74" }; // photos we can't read
   let radarToneKey = "";
+  let wallPalette = PALETTE_FALLBACK; // the palette last applied (the dither reads it)
 
   function updateRadarPalette() {
     const m = config.bg.mode;
-    if (m === "image" && config.bg.imageUrl) return paletteFromImage(config.bg.imageUrl);
-    if (m === "solid") return applyRadarPalette(paletteFromColor(config.bg.color || "#f4f1ea"));
+    if (bgImage()) return paletteFromImage(bgImage());
+    if (m === "solid" || m === "dither") return applyRadarPalette(paletteFromColor(config.bg.color || "#f4f1ea"));
     if (m === "adaptive") return applyRadarPalette(paletteFromColor(averageHex(adaptiveSlot().bg.match(/#[\da-f]{6}/gi))));
     applyRadarPalette(paletteFromColor("#f4f1ea")); // paper
   }
@@ -179,8 +190,9 @@
         ctx.drawImage(img, 0, 0, 48, 48);
         palette = samplePalette(ctx.getImageData(0, 0, 48, 48).data);
       } catch (e) {}
-      if (!palette || config.bg.mode !== "image" || config.bg.imageUrl !== url) return;
+      if (!palette || bgImage() !== url) return;
       applyRadarPalette(palette);
+      syncDither(); // its ink follows the photo's brightness
       try { localStorage.setItem(LS.palette, JSON.stringify({ v: 2, url, palette })); } catch (e) {}
     };
     img.src = url;
@@ -217,6 +229,7 @@
   }
 
   function applyRadarPalette(palette) {
+    wallPalette = palette;
     const t = radarTones(palette);
     const key = t.surface + t.line + t.ink;
     if (key === radarToneKey) return; // adaptive mode calls this every second
@@ -237,6 +250,248 @@
   const rgbHex = (rgb) => "#" + rgb.map((v) => Math.round(Math.max(0, Math.min(255, v))).toString(16).padStart(2, "0")).join("");
   const mixHex = (a, b, t) => { const x = hexRgb(a), y = hexRgb(b); return rgbHex(x.map((v, i) => v + (y[i] - v) * t)); };
   const averageHex = (list) => rgbHex([0, 1, 2].map((i) => list.reduce((s, hex) => s + hexRgb(hex)[i], 0) / list.length));
+
+  /* ----- dither background (weather-adaptive) ---------------------------- */
+  // A low-resolution canvas between the wallpaper and the page. Each frame a
+  // slow cloud field (two scrolling noise layers) is quantised to four tones
+  // through an 8×8 Bayer matrix, then rain or snow is stamped on top. The
+  // tones are the page's own colour, a few percent lighter (dark colours) or
+  // darker (light ones), drawn as near-transparent ink so the same layer sits
+  // over a photo too.
+  //
+  // The weather picks the scene: cloud cover sets how much of the field
+  // shows, wind its drift and the slant of the rain, the WMO code how hard it
+  // falls; storms flash now and then; after dark it all slows and dims.
+  const DITHER_FPS = 30;
+  const BAYER = [0, 32, 8, 40, 2, 34, 10, 42, 48, 16, 56, 24, 50, 18, 58, 26, 12, 44, 4, 36, 14, 46, 6, 38, 60, 28, 52, 20, 62, 30, 54, 22,
+    3, 35, 11, 43, 1, 33, 9, 41, 51, 19, 59, 27, 49, 17, 57, 25, 15, 47, 7, 39, 13, 45, 5, 37, 63, 31, 55, 23, 61, 29, 53, 21].map((v) => (v + 0.5) / 64);
+  // WMO code → how hard it is falling, 0–1 (drizzle … violent showers)
+  const FALL = { 51: 0.15, 53: 0.25, 55: 0.4, 56: 0.2, 57: 0.4, 61: 0.3, 63: 0.55, 65: 0.9, 66: 0.35, 67: 0.8, 71: 0.3, 73: 0.6, 75: 0.9, 77: 0.3, 80: 0.4, 81: 0.65, 82: 1, 85: 0.5, 86: 0.9, 95: 0.85, 96: 0.95, 99: 1 };
+  const PINNED = { clear: 0, cloud: 3, fog: 45, rain: 63, snow: 73, storm: 95 }; // Settings → Conditions
+  const STILL = matchMedia("(prefers-reduced-motion: reduce)");
+  const NOISE = 512; // noise tile edge, in canvas pixels (a power of two)
+  const dither = { on: false, raf: 0, last: 0, w: 0, h: 0, cur: null, drops: [], flakes: [], flash: 0, nextFlash: 0, o1x: 0, o1y: 0, o2x: 0, o2y: 0, t: 0 };
+
+  // tileable fractal value noise, 0–1
+  function makeNoise(cells) {
+    const out = new Float32Array(NOISE * NOISE);
+    for (let amp = 1, oct = 0; oct < 4; oct++, cells *= 2, amp *= 0.5) {
+      const grid = Float32Array.from({ length: cells * cells }, Math.random);
+      const smooth = (f) => f * f * (3 - 2 * f);
+      for (let y = 0, i = 0; y < NOISE; y++) {
+        const fy = (y * cells) / NOISE, y0 = fy | 0, y1 = (y0 + 1) % cells, ty = smooth(fy - y0);
+        for (let x = 0; x < NOISE; x++, i++) {
+          const fx = (x * cells) / NOISE, x0 = fx | 0, x1 = (x0 + 1) % cells, tx = smooth(fx - x0);
+          const top = grid[y0 * cells + x0] + (grid[y0 * cells + x1] - grid[y0 * cells + x0]) * tx;
+          const bot = grid[y1 * cells + x0] + (grid[y1 * cells + x1] - grid[y1 * cells + x0]) * tx;
+          out[i] += amp * (top + (bot - top) * ty);
+        }
+      }
+    }
+    let lo = Infinity, hi = -Infinity;
+    for (const v of out) { if (v < lo) lo = v; if (v > hi) hi = v; }
+    return out.map((v) => (v - lo) / (hi - lo));
+  }
+
+  // weather → what the canvas should be doing
+  function ditherScene() {
+    const w = weatherNow;
+    const pin = PINNED[config.bg.ditherScene];
+    const code = pin != null ? pin : w ? w.code : 0;
+    const hr = new Date().getHours();
+    const night = w ? !w.isDay : hr >= 20 || hr < 5;
+    const wind = w ? Math.min(w.wind / 40, 1.25) : 0.15;       // 40 km/h reads as a windy day
+    const east = w ? -Math.sin((w.windDir * Math.PI) / 180) : 1; // + = blowing left → right
+    const dir = (east < 0 ? -1 : 1) * (0.35 + 0.65 * Math.abs(east));
+    const fall = FALL[code] || 0;
+    const snowing = (code >= 71 && code <= 77) || code === 85 || code === 86;
+    const storm = code >= 95;
+    // field: tone = bias + gain × noise (+ grad down the screen), capped
+    let f;
+    if (code === 45 || code === 48) f = { bias: 0.1, gain: 0.55, cap: 0.75, grad: 0.3, speed: 0.4 };            // fog: an even, near-still haze
+    else if (storm) f = { bias: -0.3, gain: 1.4, cap: 0.6, grad: 0, speed: 4 };
+    else if (snowing) f = { bias: -0.45, gain: 1.1, cap: 0.4, grad: 0.12, speed: 0.8 };
+    else if (fall) f = { bias: -0.5 + 0.15 * fall, gain: 1.3, cap: 0.5, grad: 0, speed: 2 };
+    else { const cover = Math.min(code, 3) / 3; f = { bias: -0.6 + 0.45 * cover, gain: 1.5, cap: 1, grad: 0, speed: 1.2 + 1.4 * cover }; }
+    const calm = night ? 0.7 : 1;
+    const area = dither.w * dither.h;
+    return {
+      bias: f.bias, gain: f.gain, cap: f.cap, grad: f.grad,
+      vx: dir * f.speed * (1 + 5 * wind) * calm,   // canvas px / second
+      vy: f.speed * 0.3 * calm,
+      slant: dir * Math.min(wind, 1.25) * 0.6,     // sideways px per px fallen
+      gust: dir * wind,
+      fall, storm, calm,
+      dim: night ? 0.8 : 1,
+      drops: fall && !snowing ? Math.round(area * (0.0008 + 0.003 * fall)) : 0,
+      flakes: snowing ? Math.round(area * (0.001 + 0.003 * fall)) : 0,
+    };
+  }
+
+  const newDrop = (c, anywhere) => {
+    const z = 0.35 + 0.65 * Math.random(), reach = Math.abs(c.slant) * dither.h;
+    return { x: -reach + Math.random() * (dither.w + 2 * reach), y: anywhere ? Math.random() * dither.h : -Math.random() * 24, z, len: 4 + (7 + 12 * c.fall) * z };
+  };
+  const newFlake = (anywhere) => ({ x: Math.random() * dither.w, y: anywhere ? Math.random() * dither.h : -2, z: 0.3 + 0.7 * Math.random(), ph: Math.random() * 6.28 });
+
+  // Bring the canvas in line with the settings and the weather. Called on
+  // every background / weather change; cheap when nothing has changed.
+  function syncDither() {
+    const box = $("#dither");
+    const on = config.bg.mode === "dither";
+    box.classList.toggle("on", on);
+    if (!on) { cancelAnimationFrame(dither.raf); dither.on = false; return; }
+
+    // ink: darker than a light page, lighter than a dark one; a touch stronger
+    // over a photo, which has texture of its own to compete with
+    const photo = !!bgImage();
+    const light = photo ? luminance(wallPalette.mid) > 0.6 : luminance(config.bg.color || "#f4f1ea") > 0.55;
+    dither.ink = light ? 0x000000 : 0xffffff;
+    dither.step = photo ? 0.05 : light ? 0.032 : 0.04; // alpha per tone
+    box.style.backgroundColor = ditherScene().dim < 1 ? "rgba(0, 0, 0, 0.08)" : ""; // night veil
+
+    const fresh = !dither.on;
+    if (fresh) {
+      dither.on = true;
+      if (!dither.n1) { dither.n1 = makeNoise(3); dither.n2 = makeNoise(5); }
+      sizeDither();
+      dither.cur = ditherScene();
+      dither.drops = Array.from({ length: dither.cur.drops }, () => newDrop(dither.cur, true));
+      dither.flakes = Array.from({ length: dither.cur.flakes }, () => newFlake(true));
+      dither.last = 0;
+    }
+    cancelAnimationFrame(dither.raf);
+    if (STILL.matches) { stepDither(0, true); drawDither(); }
+    else dither.raf = requestAnimationFrame(ditherFrame);
+  }
+
+  // canvas pixels are 4 CSS px (larger on very wide screens, to bound the work)
+  function sizeDither() {
+    const box = $("#dither"), cv = box.firstElementChild;
+    const scale = Math.max(4, Math.ceil(box.clientWidth / 640));
+    const w = Math.ceil(box.clientWidth / scale), ht = Math.ceil(box.clientHeight / scale);
+    if (w === dither.w && ht === dither.h) return;
+    dither.w = cv.width = w; dither.h = cv.height = ht;
+    cv.style.width = w * scale + "px"; cv.style.height = ht * scale + "px";
+    dither.ctx = cv.getContext("2d");
+    dither.img = dither.ctx.createImageData(w, ht);
+    dither.px = new Uint32Array(dither.img.data.buffer);
+    dither.lvl = new Uint8Array(w * ht);
+  }
+
+  function ditherFrame(now) {
+    dither.raf = requestAnimationFrame(ditherFrame);
+    if (now - dither.last < 1000 / DITHER_FPS - 2) return;
+    const dt = dither.last ? Math.min((now - dither.last) / 1000, 0.1) : 0;
+    dither.last = now;
+    stepDither(dt, false);
+    drawDither();
+  }
+
+  // advance the scene by dt seconds (snap: jump straight to the target scene)
+  function stepDither(dt, snap) {
+    const c = dither.cur, to = ditherScene(), k = snap ? 1 : Math.min(1, dt * 0.9);
+    for (const key of ["bias", "gain", "cap", "grad", "vx", "vy", "slant", "gust", "dim"]) c[key] += (to[key] - c[key]) * k;
+    c.fall = to.fall || c.fall; // drops already falling keep their pace as the rain eases off
+    c.storm = to.storm;
+    dither.t += dt;
+    dither.o1x -= c.vx * dt; dither.o1y -= c.vy * dt;               // the two layers slide
+    dither.o2x -= c.vx * 0.55 * dt; dither.o2y += c.vy * 1.7 * dt;  // apart, so shapes evolve
+
+    // rain: top up towards the target count; drops leaving the screen are
+    // recycled, or retired once there are too many
+    const { w, h: ht, drops, flakes } = dither;
+    if (snap) {
+      dither.drops.length = Math.min(drops.length, to.drops); dither.flakes.length = Math.min(flakes.length, to.flakes);
+      while (drops.length < to.drops) drops.push(newDrop(c, true));
+      while (flakes.length < to.flakes) flakes.push(newFlake(true));
+    }
+    for (let n = Math.min(to.drops - drops.length, Math.ceil(to.drops * dt)); n > 0; n--) drops.push(newDrop(c, false));
+    const speed = (70 + 150 * c.fall) * c.calm;
+    for (let i = drops.length - 1; i >= 0; i--) {
+      const d = drops[i], v = speed * (0.5 + 0.5 * d.z) * dt;
+      d.y += v; d.x += v * c.slant;
+      if (d.y - d.len > ht) { if (drops.length > to.drops) drops.splice(i, 1); else drops[i] = newDrop(c, false); }
+    }
+    for (let n = Math.min(to.flakes - flakes.length, Math.ceil(to.flakes * dt * 0.4)); n > 0; n--) flakes.push(newFlake(false));
+    for (let i = flakes.length - 1; i >= 0; i--) {
+      const f = flakes[i];
+      f.y += (5 + 13 * f.z) * c.calm * dt;
+      f.x += (c.gust * 22 * f.z + Math.sin(dither.t * 0.9 + f.ph) * 2.2) * dt;
+      if (f.x < 0) f.x += w; else if (f.x >= w) f.x -= w;
+      if (f.y > ht) { if (flakes.length > to.flakes) flakes.splice(i, 1); else flakes[i] = newFlake(false); }
+    }
+
+    // lightning: a strike every 5–16 s, often with a second flicker
+    if (c.storm && !snap) {
+      if (!dither.nextFlash) dither.nextFlash = dither.t + 3 + Math.random() * 6;
+      if (dither.t >= dither.nextFlash) {
+        dither.flash = 0.6 + 0.4 * Math.random();
+        dither.nextFlash = dither.t + (Math.random() < 0.45 ? 0.12 + Math.random() * 0.2 : 5 + Math.random() * 11);
+      }
+    } else dither.nextFlash = 0;
+    dither.flash = dither.flash > 0.01 ? dither.flash * Math.exp(-dt * 7) : 0;
+  }
+
+  function drawDither() {
+    const { w, h: ht, lvl, px, n1, n2, cur: c } = dither;
+    const M = NOISE - 1;
+    const ax = Math.floor(dither.o1x), ay = Math.floor(dither.o1y), bx = Math.floor(dither.o2x), by = Math.floor(dither.o2y);
+    const gain = c.gain / 2, cap = c.cap;
+
+    // 1. the cloud field → tone 0–3 per pixel (ordered dither)
+    for (let y = 0, i = 0; y < ht; y++) {
+      const r1 = ((y + ay) & M) * NOISE, r2 = ((y + by) & M) * NOISE, t = (y & 7) << 3;
+      const base = c.bias + (c.grad * y) / ht;
+      for (let x = 0; x < w; x++, i++) {
+        let v = base + gain * (n1[r1 + ((x + ax) & M)] + n2[r2 + ((x + bx) & M)]);
+        v = v < 0 ? 0 : v > cap ? cap : v;
+        const s = v * 3, l = s | 0;
+        lvl[i] = s - l > BAYER[t | (x & 7)] ? l + 1 : l;
+      }
+    }
+
+    // 2. rain: a streak per drop, brightest at the head, dithering out along
+    //    the tail; far drops are shorter and fainter
+    for (const d of dither.drops) {
+      const hx = d.x, hy = Math.floor(d.y), n = d.len | 0;
+      for (let k = 0; k < n; k++) {
+        const y = hy - k, x = Math.floor(hx - k * c.slant);
+        if (y < 0 || y >= ht || x < 0 || x >= w) continue;
+        const s = (1 - k / n) * d.z * 3, l = s | 0, tone = s - l > BAYER[((y & 7) << 3) | (x & 7)] ? l + 1 : l, i = y * w + x;
+        if (tone > lvl[i]) lvl[i] = tone;
+      }
+    }
+
+    // 3. snow: single flecks, the nearest ones brighter and a little bigger
+    for (const f of dither.flakes) {
+      const x = Math.floor(f.x), y = Math.floor(f.y);
+      if (y < 0 || y >= ht) continue;
+      const i = y * w + x, tone = f.z > 0.72 ? 3 : f.z > 0.45 ? 2 : 1;
+      if (tone > lvl[i]) lvl[i] = tone;
+      if (f.z > 0.9 && x + 1 < w && y + 1 < ht) { if (lvl[i + 1] < 2) lvl[i + 1] = 2; if (lvl[i + w] < 2) lvl[i + w] = 2; }
+    }
+
+    // 4. tones → pixels. Lightning lifts every tone on a dark page, and
+    //    washes the pattern out towards the bright page on a light one.
+    const tones = [0, 1, 2, 3].map((l) => {
+      let a = l * dither.step * c.dim;
+      a = dither.ink ? a + dither.flash * 0.1 : a * (1 - dither.flash * 0.85);
+      return ((Math.round(a * 255) << 24) | dither.ink) >>> 0;
+    });
+    for (let i = 0; i < lvl.length; i++) px[i] = tones[lvl[i]];
+    dither.ctx.putImageData(dither.img, 0, 0);
+  }
+
+  function initDither() {
+    let queued = false;
+    window.addEventListener("resize", () => {
+      if (queued || !dither.on) return;
+      queued = true;
+      requestAnimationFrame(() => { queued = false; if (!dither.on) return; sizeDither(); if (STILL.matches) { stepDither(0, true); drawDither(); } });
+    });
+    STILL.addEventListener("change", syncDither);
+  }
 
   /* ----- icon tiles ----------------------------------------------------- */
   // Builds a .tile element. Favicon/image is preloaded and only swapped in on
@@ -683,7 +938,10 @@
 
   function seg(options, current, onPick) {
     const wrap = h("div", { class: "segmented" });
-    options.forEach((o) => wrap.append(h("button", { type: "button", class: o.value === current ? "active" : "", onclick: () => onPick(o.value) }, o.label)));
+    options.forEach((o) => wrap.append(h("button", { type: "button", class: o.value === current ? "active" : "", onclick: (e) => {
+      [...wrap.children].forEach((b) => b.classList.toggle("active", b === e.currentTarget));
+      onPick(o.value);
+    } }, o.label)));
     return wrap;
   }
 
@@ -867,30 +1125,60 @@
 
     // engine
     sheet.append(h("div", { class: "field" }, h("label", {}, "Search engine"),
-      seg(Object.keys(ENGINES).map((k) => ({ value: k, label: ENGINES[k].name })), config.engine, (v) => { config.engine = v; saveConfig(); renderEngine(); reSeg(0, v); })));
+      seg(Object.keys(ENGINES).map((k) => ({ value: k, label: ENGINES[k].name })), config.engine, (v) => { config.engine = v; saveConfig(); renderEngine(); })));
 
     sheet.append(h("div", { class: "section-divider" }));
 
     // background mode
     const bgField = h("div", { class: "field" }, h("label", {}, "Background"),
-      seg([{ value: "paper", label: "Paper" }, { value: "solid", label: "Solid" }, { value: "image", label: "Image" }, { value: "adaptive", label: "Adaptive" }], config.bg.mode, (v) => { config.bg.mode = v; saveConfig(); applyBackground(); reSeg(1, v); renderBgControls(); }));
+      seg([{ value: "paper", label: "Paper" }, { value: "solid", label: "Solid" }, { value: "image", label: "Image" }, { value: "adaptive", label: "Adaptive" }, { value: "dither", label: "Dither" }], config.bg.mode, (v) => { config.bg.mode = v; saveConfig(); applyBackground(); renderWeather(); renderBgControls(); }));
     const bgControls = h("div", {});
     sheet.append(bgField, bgControls);
+
+    // the 8 swatches + a free picker (a native colour input under a swatch)
+    function colourSwatches() {
+      const cur = (config.bg.color || "").toLowerCase();
+      const sw = h("div", { class: "swatches", style: { marginTop: "10px" } });
+      SWATCHES.forEach((c) => sw.append(h("div", { class: "swatch" + (c === cur ? " active" : ""), style: { background: c }, title: c, onclick: () => { config.bg.color = c; saveConfig(); applyBackground(); renderBgControls(); } })));
+      const custom = !SWATCHES.includes(cur);
+      const tile = h("label", { class: "swatch swatch-custom" + (custom ? " active" : ""), title: "Custom colour", style: custom ? { background: cur } : null },
+        h("span", { html: PLUS }),
+        h("input", { type: "color", value: /^#[\da-f]{6}$/.test(cur) ? cur : "#f4f1ea", "aria-label": "Custom colour",
+          // live while the picker is open; the row is only rebuilt once it closes
+          oninput: (e) => { config.bg.color = e.target.value; tile.style.background = e.target.value; applyBackground(); },
+          onchange: () => { saveConfig(); renderBgControls(); } }));
+      sw.append(tile);
+      return sw;
+    }
+    const imageInput = () => h("input", { type: "url", value: config.bg.imageUrl, placeholder: "https://…/photo.jpg", oninput: (e) => { config.bg.imageUrl = e.target.value; }, onchange: (e) => { config.bg.imageUrl = e.target.value.trim(); saveConfig(); applyBackground(); } });
 
     function renderBgControls() {
       bgControls.innerHTML = "";
       const m = config.bg.mode;
       if (m === "solid") {
-        const sw = h("div", { class: "swatches", style: { marginTop: "10px" } });
-        SWATCHES.forEach((c) => sw.append(h("div", { class: "swatch" + (c.toLowerCase() === (config.bg.color || "").toLowerCase() ? " active" : ""), style: { background: c }, title: c, onclick: () => { config.bg.color = c; saveConfig(); applyBackground(); renderBgControls(); } })));
-        bgControls.append(sw);
+        bgControls.append(colourSwatches());
       } else if (m === "image") {
         bgControls.append(
           h("div", { class: "field", style: { marginTop: "10px", marginBottom: "0" } },
-            h("input", { type: "url", value: config.bg.imageUrl, placeholder: "https://…/photo.jpg", oninput: (e) => { config.bg.imageUrl = e.target.value; }, onchange: (e) => { config.bg.imageUrl = e.target.value.trim(); saveConfig(); applyBackground(); } }),
+            imageInput(),
             h("p", { class: "hint" }, "Paste any image URL. Tip: Unsplash 'Download' links work great. Text switches to light automatically — override below.")));
       } else if (m === "adaptive") {
         bgControls.append(h("p", { class: "hint", style: { marginTop: "10px" } }, "Tones shift through the day — soft light by morning, warm at dusk, deep at night."));
+      } else if (m === "dither") {
+        const scenes = [["live", "Live weather"], ["clear", "Clear"], ["cloud", "Cloudy"], ["fog", "Fog"], ["rain", "Rain"], ["snow", "Snow"], ["storm", "Storm"]];
+        bgControls.append(
+          h("div", { class: "row", style: { marginTop: "12px" } },
+            h("span", { class: "hint", style: { margin: "0" } }, "Drawn over"),
+            seg([{ value: "color", label: "Colour" }, { value: "image", label: "Image" }], config.bg.ditherBase, (v) => { config.bg.ditherBase = v; saveConfig(); applyBackground(); renderBgControls(); })),
+          config.bg.ditherBase === "image"
+            ? h("div", { class: "field", style: { marginTop: "10px", marginBottom: "0" } }, imageInput())
+            : colourSwatches(),
+          h("div", { class: "row", style: { marginTop: "12px" } },
+            h("span", { class: "hint", style: { margin: "0" } }, "Conditions"),
+            h("div", { class: "field", style: { margin: "0" } },
+              h("select", { "aria-label": "Conditions", onchange: (e) => { config.bg.ditherScene = e.target.value; saveConfig(); syncDither(); } },
+                scenes.map(([value, label]) => h("option", { value, selected: value === config.bg.ditherScene ? "" : null }, label))))),
+          h("p", { class: "hint" }, "A quiet dithered texture that moves with the weather outside — drifting when clear, falling as rain, settling as snow. Live weather needs location access; without it the pattern simply drifts."));
       } else {
         bgControls.append(h("p", { class: "hint", style: { marginTop: "10px" } }, "Warm off-white paper — the Editorial default."));
       }
@@ -899,7 +1187,7 @@
 
     // appearance
     sheet.append(h("div", { class: "field", style: { marginTop: "16px" } }, h("label", {}, "Text & contrast"),
-      seg([{ value: "auto", label: "Auto" }, { value: "light", label: "Dark text" }, { value: "dark", label: "Light text" }], config.appearance, (v) => { config.appearance = v; saveConfig(); applyBackground(); reSeg(2, v); })));
+      seg([{ value: "auto", label: "Auto" }, { value: "light", label: "Dark text" }, { value: "dark", label: "Light text" }], config.appearance, (v) => { config.appearance = v; saveConfig(); applyBackground(); })));
 
     sheet.append(h("div", { class: "section-divider" }));
 
@@ -908,7 +1196,7 @@
     sheet.append(h("div", { class: "field" }, h("div", { class: "row" }, h("label", { style: { margin: "0" } }, "Weather widget"), wToggle),
       h("div", { class: "row", style: { marginTop: "12px" } },
         h("span", { class: "hint", style: { margin: "0" } }, "Temperature unit"),
-        seg([{ value: "c", label: "°C" }, { value: "f", label: "°F" }], config.weather.unit, (v) => { config.weather.unit = v; saveConfig(); localStorage.removeItem(LS.weather); reSeg(4, v); renderWeather(); }))));
+        seg([{ value: "c", label: "°C" }, { value: "f", label: "°F" }], config.weather.unit, (v) => { config.weather.unit = v; saveConfig(); localStorage.removeItem(LS.weather); renderWeather(); }))));
 
     // recent toggle
     const rToggle = h("button", { type: "button", class: "toggle" + (config.showRecent ? " on" : ""), role: "switch", "aria-checked": String(config.showRecent), onclick: () => { config.showRecent = !config.showRecent; rToggle.classList.toggle("on", config.showRecent); saveConfig(); renderRecent(); } });
@@ -917,13 +1205,6 @@
     sheet.append(h("div", { class: "actions" },
       h("button", { class: "btn btn-danger spacer", type: "button", onclick: resetAll }, "Reset everything"),
       h("button", { class: "btn btn-primary", type: "button", onclick: closeModal }, "Done")));
-
-    // helper: refresh a segmented control's active buttons after external change
-    function reSeg(idx, v) {
-      const all = sheet.querySelectorAll(".segmented");
-      const segEl = all[idx]; if (!segEl) return;
-      [...segEl.children].forEach((b) => b.classList.toggle("active", b.textContent.replace("°", "").toLowerCase() === v.replace("°", "").toLowerCase()));
-    }
 
     openModal(sheet);
   }
@@ -935,6 +1216,7 @@
     recent = [];
     saveConfig(); saveLinks(); saveRecent();
     localStorage.removeItem(LS.weather);
+    weatherNow = null;
     closeModal(); renderAll();
   }
 
@@ -1151,32 +1433,41 @@
     return { label, svg: GLYPHS[kind] };
   }
 
+  // The readout and the dither background share one fetch: either wanting it
+  // is enough to ask, and the widget alone decides whether it shows.
+  let weatherNow = null; // { temp, code, isDay, wind (km/h), windDir (° it blows from) }
+  const weatherWanted = () => config.weather.enabled || config.bg.mode === "dither";
+
   function renderWeather(data) {
     const el = $("#weather");
-    if (!config.weather.enabled) { el.classList.add("hidden"); return; }
+    if (!weatherWanted()) { el.classList.add("hidden"); return; }
     if (data) {
+      weatherNow = data;
+      syncDither();
+      el.classList.toggle("hidden", !config.weather.enabled);
+      if (!config.weather.enabled) return;
       const g = weatherGlyph(data.code);
-      el.classList.remove("hidden");
       el.innerHTML = "";
       el.append(h("span", { html: g.svg }), h("span", {}, `${data.temp}°`), h("span", { class: "weather-label" }, g.label));
       return;
     }
-    // try cache, else fetch
+    if (!config.weather.enabled) el.classList.add("hidden");
+    // try cache, else fetch (caches from before wind / day-night are refetched)
     let cached = null;
     try { cached = JSON.parse(localStorage.getItem(LS.weather)); } catch (e) {}
-    if (cached && cached.unit === config.weather.unit && Date.now() - cached.t < 30 * 60 * 1000) { renderWeather(cached.data); return; }
+    if (cached && cached.unit === config.weather.unit && cached.data && cached.data.isDay != null && Date.now() - cached.t < 30 * 60 * 1000) { renderWeather(cached.data); return; }
     fetchWeather();
   }
 
   function fetchWeather() {
-    if (!config.weather.enabled || !navigator.geolocation) { $("#weather").classList.add("hidden"); return; }
+    if (!weatherWanted() || !navigator.geolocation) { $("#weather").classList.add("hidden"); return; }
     navigator.geolocation.getCurrentPosition(async (pos) => {
       try {
         const { latitude, longitude } = pos.coords;
         const unit = config.weather.unit === "f" ? "fahrenheit" : "celsius";
-        const r = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${latitude.toFixed(3)}&longitude=${longitude.toFixed(3)}&current=temperature_2m,weather_code&temperature_unit=${unit}`);
-        const j = await r.json();
-        const data = { temp: Math.round(j.current.temperature_2m), code: j.current.weather_code };
+        const r = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${latitude.toFixed(3)}&longitude=${longitude.toFixed(3)}&current=temperature_2m,weather_code,is_day,wind_speed_10m,wind_direction_10m&temperature_unit=${unit}`);
+        const c = (await r.json()).current;
+        const data = { temp: Math.round(c.temperature_2m), code: c.weather_code, isDay: c.is_day !== 0, wind: c.wind_speed_10m || 0, windDir: c.wind_direction_10m || 0 };
         localStorage.setItem(LS.weather, JSON.stringify({ t: Date.now(), unit: config.weather.unit, data }));
         renderWeather(data);
       } catch (e) { $("#weather").classList.add("hidden"); }
@@ -1403,11 +1694,15 @@
     $("#settings-btn").innerHTML = GEAR;
 
     renderAll();
+    initDither();
     initNotes();
     initRadar();
 
     // clock ticking
     setInterval(renderClock, 1000);
+    // a tab left open keeps up with the weather (served from the 30-min cache
+    // until it goes stale)
+    setInterval(() => renderWeather(), 10 * 60 * 1000);
 
     // search submit
     $("#search-form").addEventListener("submit", (e) => {
