@@ -49,7 +49,9 @@ Link, Settings). The page is a single full-viewport column.
   collapses to one column and the radar + notes drop below the links, notes at
   `min(460px, 70vh)` tall. At ≤640px (phones): short date (`THU · 12 NOV
   2026`), weather shows glyph + temperature only, links become an even
-  two-up grid with clipped names, the radar goes full width and modals become
+  two-up grid with clipped names (a folder's count is hidden, and any hover
+  edit/remove buttons float over the card's end, so the name gets the whole
+  row), the radar goes full width and modals become
   bottom sheets. The wallpaper paints on a fixed `body::before` layer
   (`--bg-image`) so it stays put while the stacked page scrolls.
   - **Touch screens** (`hover: none`): no hover edit/remove buttons and no
