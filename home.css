@@ -364,7 +364,9 @@ body::before {
 @media (hover: none) {
   .link-card { -webkit-touch-callout: none; }
   .link-card:active { background: var(--card-hover); }
-  .card-actions { display: none; }
+  /* (named by their parents so this outranks the base rule further down) */
+  .link-card .card-actions,
+  .bubble .card-actions { display: none; }
 }
 .link-card.dragging { opacity: 0.4; }
 .link-card.drag-over { border-color: var(--accent); }
@@ -1328,6 +1330,27 @@ body::before {
   .links { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
   .link-card { min-width: 0; padding: 9px 12px 9px 9px; }
   .link-card .name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  /* the row is the name's: a folder's count goes (the links are on show once
+     it opens), and where edit / remove exist at all (a narrow window with a
+     mouse) they float over the card's end instead of taking a share of it,
+     arriving after a beat so a quick click on the card can't land on them. */
+  .folder-count { display: none; }
+  .link-card .card-actions {
+    position: absolute;
+    right: 5px;
+    top: 50%;
+    transform: translateY(-50%);
+    margin: 0;
+    padding: 2px;
+    border-radius: 8px;
+    background: var(--card-bg);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    visibility: hidden;
+    transition: none;
+  }
+  [data-theme="dark"] .link-card .card-actions { background: rgba(38, 40, 46, 0.8); }
+  .link-card:hover .card-actions { visibility: visible; transition: opacity 0.12s ease 0.25s, visibility 0s linear 0.25s; }
   .add-card { justify-content: center; padding: 9px 12px; min-height: 50px; }
   .add-wrap .add-card { flex: 1; }
   .icon-grid { grid-template-columns: repeat(6, 1fr); }
